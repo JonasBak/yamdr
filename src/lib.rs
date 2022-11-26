@@ -1,9 +1,7 @@
 use layout::backends::svg::SVGWriter;
 use layout::gv;
 use miniserde::{json, Deserialize};
-use pulldown_cmark::{
-    escape::escape_html, html, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag,
-};
+use pulldown_cmark::{escape::escape_html, html, CodeBlockKind, Event, Options, Parser, Tag};
 
 mod script {
     use pulldown_cmark::escape::escape_html;
@@ -29,6 +27,18 @@ mod script {
             }
         }
         return output;
+    }
+}
+
+mod wasm {
+    use super::*;
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen]
+    pub fn markdown_to_html(markdown: &str) -> String {
+        let options = YamdrOptions { standalone: None };
+        let (_meta, html) = super::markdown_to_html(options, markdown);
+        return html;
     }
 }
 
@@ -80,8 +90,8 @@ fn error_event<'a>(msg: &str) -> Event<'a> {
 }
 
 pub fn markdown_to_html(options: YamdrOptions, markdown: &str) -> (Meta, String) {
-    let options = Options::all();
-    let parser = Parser::new_ext(markdown, options);
+    let md_options = Options::all();
+    let parser = Parser::new_ext(markdown, md_options);
 
     let mut current_custom_block: Option<Result<CustomBlock, CustomBlockError>> = None;
 
@@ -153,8 +163,9 @@ pub fn markdown_to_html(options: YamdrOptions, markdown: &str) -> (Meta, String)
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);
 
-    let html_output = format!(
-        r#"
+    if let Some(standalone_options) = options.standalone {
+        html_output = format!(
+            r#"
 <!DOCTYPE html>
 <html>
     <head>
@@ -165,10 +176,19 @@ pub fn markdown_to_html(options: YamdrOptions, markdown: &str) -> (Meta, String)
             {}
         </div>
     </body>
-</html>
-"#,
-        STYLE, html_output
-    );
+</html>"#,
+            STYLE, html_output
+        );
+    } else {
+        html_output = format!(
+            r#"
+{}
+<div class="content">
+{}
+</div>"#,
+            STYLE, html_output
+        );
+    }
 
     let meta = Meta {};
 

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en-US">
+  <head>
+    <meta charset="utf-8" />
+    <title>yamdr</title>
+  </head>
+  <body>
+    <script type="module">
+      import init, { markdown_to_html } from "./pkg/yamdr.js";
+      init().then(() => {
+        document.getElementById("render").addEventListener("click", (e) => {
+          const md = document.getElementById("input").value;
+          document.getElementById("output").innerHTML = markdown_to_html(md);
+        });
+      });
+    </script>
+    <div>
+      <textarea id="input"># Yamdr example</textarea>
+    </div>
+    <div>
+      <button id="render">Render</button>
+    </div>
+    <div id="output"></div>
+  </body>
+</html>
