@@ -40,6 +40,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
+name = "cli"
+version = "0.1.0"
+dependencies = [
+ "md",
+]
+
+[[package]]
 name = "const-random"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -126,6 +133,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "abb12e687cfb44aa40f41fc3978ef76448f9b6038cad6aef4259d3c095a2382e"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "md"
+version = "0.1.0"
+dependencies = [
+ "layout-rs",
+ "miniserde",
+ "pulldown-cmark",
+ "rhai",
 ]
 
 [[package]]
@@ -310,6 +327,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423"
 
 [[package]]
+name = "wasm"
+version = "0.1.0"
+dependencies = [
+ "md",
+ "rhai",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "wasm-bindgen"
 version = "0.2.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -370,16 +396,5 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bcda906d8be16e728fd5adc5b729afad4e444e106ab28cd1c7256e54fa61510f"
 dependencies = [
  "js-sys",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "yamdr"
-version = "0.1.0"
-dependencies = [
- "layout-rs",
- "miniserde",
- "pulldown-cmark",
- "rhai",
  "wasm-bindgen",
 ]

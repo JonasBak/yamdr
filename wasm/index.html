@@ -6,7 +6,7 @@
   </head>
   <body>
     <script type="module">
-      import init, { markdown_to_html } from "./pkg/yamdr.js";
+      import init, { markdown_to_html } from "./pkg/wasm.js";
       init().then(() => {
         document.getElementById("render").addEventListener("click", (e) => {
           const md = document.getElementById("input").value;

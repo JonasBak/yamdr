@@ -30,18 +30,6 @@ mod script {
     }
 }
 
-mod wasm {
-    use super::*;
-    use wasm_bindgen::prelude::*;
-
-    #[wasm_bindgen]
-    pub fn markdown_to_html(markdown: &str) -> String {
-        let options = YamdrOptions { standalone: None };
-        let (_meta, html) = super::markdown_to_html(options, markdown);
-        return html;
-    }
-}
-
 static STYLE: &str = r#"
 <style>
     .script {
