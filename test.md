@@ -32,6 +32,16 @@ abc
 ```
 
 ```{"t": "Script"}
-let x = 4 + 5
-x
+let x = 4 + 5;
+x;
+
+fn fib(n) {
+    if n < 2 {
+        n
+    } else {
+        fib(n-1) + fib(n-2)
+    }
+}
+
+debug(fib(5));
 ```

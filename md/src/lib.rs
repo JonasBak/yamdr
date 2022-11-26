@@ -6,27 +6,41 @@ use pulldown_cmark::{escape::escape_html, html, CodeBlockKind, Event, Options, P
 mod script {
     use pulldown_cmark::escape::escape_html;
     use rhai::{plugin::Dynamic, Engine, Scope};
+    use std::sync::Arc;
+    use std::sync::RwLock;
 
-    pub fn run_block(script: String) -> String {
-        let engine = Engine::new();
+    pub fn run_block(script: String) -> Result<String, String> {
+        let mut engine = Engine::new();
         let mut scope = Scope::new();
 
         let mut output = String::new();
 
-        for line in script.lines() {
+        let mut printed = String::new();
+
+        let logbook = Arc::new(RwLock::new(Vec::<(usize, String)>::new()));
+
+        let log = logbook.clone();
+        engine.on_debug(move |s, _, pos| {
+            log.write().unwrap().push((pos.line().unwrap_or(1), s.to_string()));
+        });
+
+        engine
+            .run_with_scope(&mut scope, &script)
+            .map_err(|err| format!("runtime error: {err:?}"))?;
+
+        for (i, line) in script.lines().enumerate() {
             let mut line_escaped = String::new();
             escape_html(&mut line_escaped, &line).unwrap();
             output += &format!(r#"<span class="script-code">{}</span>"#, line_escaped);
             output += "\n";
-            let result = engine.eval_with_scope::<Dynamic>(&mut scope, line).unwrap();
-            if !result.is::<()>() {
-                let mut result_escaped = String::new();
-                escape_html(&mut result_escaped, &format!("> {:?}", result)).unwrap();
-                output += &format!(r#"<span class="script-output">{}</span>"#, result_escaped);
+            for (_, entry) in logbook.read().unwrap().iter().filter(|(l, _)| *l == i + 1) {
+                let mut entry_escaped = String::new();
+                escape_html(&mut entry_escaped, &format!("> {entry}")).unwrap();
+                output += &format!(r#"<span class="script-output">{}</span>"#, entry_escaped);
                 output += "\n";
             }
         }
-        return output;
+        return Ok(output);
     }
 }
 
@@ -138,8 +152,16 @@ pub fn markdown_to_html(options: YamdrOptions, markdown: &str) -> (Meta, String)
                 }
                 CustomBlockType::Script => {
                     let output = script::run_block(text.to_string());
-                    let tag = format!(r#"<div class="script"><pre>{}</pre></div>"#, output);
-                    return Some(Event::Html(tag.into()));
+                    match output {
+                        Ok(output) => {
+                            let tag = format!(r#"<div class="script"><pre>{}</pre></div>"#, output);
+                            return Some(Event::Html(tag.into()));
+                        }
+                        Err(err) => {
+                            errors.push(err.clone());
+                            return Some(error_event(&err));
+                        }
+                    }
                 }
                 _ => {}
             }
