@@ -30,3 +30,8 @@ digraph D {
 ```{"t": "aa"}
 abc
 ```
+
+```{"t": "Script"}
+let x = 4 + 5
+x
+```

@@ -5,6 +5,48 @@ use pulldown_cmark::{
     escape::escape_html, html, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag,
 };
 
+mod script {
+    use pulldown_cmark::escape::escape_html;
+    use rhai::{plugin::Dynamic, Engine, Scope};
+
+    pub fn run_block(script: String) -> String {
+        let engine = Engine::new();
+        let mut scope = Scope::new();
+
+        let mut output = String::new();
+
+        for line in script.lines() {
+            let mut line_escaped = String::new();
+            escape_html(&mut line_escaped, &line).unwrap();
+            output += &format!(r#"<span class="script-code">{}</span>"#, line_escaped);
+            output += "\n";
+            let result = engine.eval_with_scope::<Dynamic>(&mut scope, line).unwrap();
+            if !result.is::<()>() {
+                let mut result_escaped = String::new();
+                escape_html(&mut result_escaped, &format!("> {:?}", result)).unwrap();
+                output += &format!(r#"<span class="script-output">{}</span>"#, result_escaped);
+                output += "\n";
+            }
+        }
+        return output;
+    }
+}
+
+static STYLE: &str = r#"
+<style>
+    .script {
+    }
+    .script-code {
+    }
+    .script-output {
+    }
+    .error {
+        background-color: red;
+        padding: 10px;
+    }
+</style>
+"#;
+
 pub struct StandaloneOptions {}
 
 pub struct YamdrOptions {
@@ -16,6 +58,7 @@ pub struct Meta {}
 #[derive(Deserialize, Debug)]
 enum CustomBlockType {
     Graph,
+    Script,
     Test,
 }
 
@@ -32,7 +75,7 @@ struct CustomBlockError {
 fn error_event<'a>(msg: &str) -> Event<'a> {
     let mut escaped = "".to_string();
     escape_html(&mut escaped, msg).unwrap();
-    let tag = format!(r#"<div style="background-color: red;">{}</div>"#, escaped);
+    let tag = format!(r#"<div class="error">{}</div>"#, escaped);
     return Event::Html(tag.into());
 }
 
@@ -95,7 +138,11 @@ pub fn markdown_to_html(options: YamdrOptions, markdown: &str) -> (Meta, String)
                         }
                     }
                 }
-
+                CustomBlockType::Script => {
+                    let output = script::run_block(text.to_string());
+                    let tag = format!(r#"<div class="script"><pre>{}</pre></div>"#, output);
+                    return Some(Event::Html(tag.into()));
+                }
                 _ => {}
             }
             None
@@ -105,6 +152,23 @@ pub fn markdown_to_html(options: YamdrOptions, markdown: &str) -> (Meta, String)
 
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);
+
+    let html_output = format!(
+        r#"
+<!DOCTYPE html>
+<html>
+    <head>
+        {}
+    </head>
+    <body>
+        <div class="content">
+            {}
+        </div>
+    </body>
+</html>
+"#,
+        STYLE, html_output
+    );
 
     let meta = Meta {};
 
