@@ -31,10 +31,7 @@ digraph D {
 abc
 ```
 
-```{"t": "Script"}
-let x = 4 + 5;
-x;
-
+```{"t": "ScriptGlobals"}
 fn fib(n) {
     if n < 2 {
         n
@@ -42,6 +39,12 @@ fn fib(n) {
         fib(n-1) + fib(n-2)
     }
 }
+```
 
+```{"t": "Script"}
+let x = 4 + 5;
+x;
+
+debug(x);
 debug(fib(5));
 ```

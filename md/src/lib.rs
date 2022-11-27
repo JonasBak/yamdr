@@ -5,42 +5,75 @@ use pulldown_cmark::{escape::escape_html, html, CodeBlockKind, Event, Options, P
 
 mod script {
     use pulldown_cmark::escape::escape_html;
-    use rhai::{plugin::Dynamic, Engine, Scope};
+    use rhai::{plugin::Dynamic, Engine, Scope, AST};
     use std::sync::Arc;
     use std::sync::RwLock;
 
-    pub fn run_block(script: String) -> Result<String, String> {
-        let mut engine = Engine::new();
-        let mut scope = Scope::new();
+    pub struct Runtime<'a> {
+        engine: Engine,
+        scope: Scope<'a>,
+        globals: Option<AST>,
+    }
 
-        let mut output = String::new();
-
-        let mut printed = String::new();
-
-        let logbook = Arc::new(RwLock::new(Vec::<(usize, String)>::new()));
-
-        let log = logbook.clone();
-        engine.on_debug(move |s, _, pos| {
-            log.write().unwrap().push((pos.line().unwrap_or(1), s.to_string()));
-        });
-
-        engine
-            .run_with_scope(&mut scope, &script)
-            .map_err(|err| format!("runtime error: {err:?}"))?;
-
-        for (i, line) in script.lines().enumerate() {
-            let mut line_escaped = String::new();
-            escape_html(&mut line_escaped, &line).unwrap();
-            output += &format!(r#"<span class="script-code">{}</span>"#, line_escaped);
-            output += "\n";
-            for (_, entry) in logbook.read().unwrap().iter().filter(|(l, _)| *l == i + 1) {
-                let mut entry_escaped = String::new();
-                escape_html(&mut entry_escaped, &format!("> {entry}")).unwrap();
-                output += &format!(r#"<span class="script-output">{}</span>"#, entry_escaped);
-                output += "\n";
-            }
+    impl Runtime<'_> {
+        pub fn new() -> Self {
+            let mut engine = Engine::new();
+            let mut scope = Scope::new();
+            return Runtime {
+                engine,
+                scope,
+                globals: None,
+            };
         }
-        return Ok(output);
+        pub fn add_globals(&mut self, script: &str) -> Result<(), String> {
+            let ast = self
+                .engine
+                .compile(script)
+                .map_err(|err| format!("compilation error: {err:?}"))?;
+            self.globals = Some(ast.clone_functions_only());
+            return Ok(());
+        }
+        pub fn run_block(&mut self, script: &str) -> Result<String, String> {
+            let mut output = String::new();
+
+            let mut printed = String::new();
+
+            let logbook = Arc::new(RwLock::new(Vec::<(usize, String)>::new()));
+
+            let log = logbook.clone();
+            self.engine.on_debug(move |s, _, pos| {
+                log.write()
+                    .unwrap()
+                    .push((pos.line().unwrap_or(1), s.to_string()));
+            });
+
+            let mut ast = self
+                .engine
+                .compile(script)
+                .map_err(|err| format!("compilation error: {err:?}"))?;
+
+            if let Some(globals) = self.globals.as_ref() {
+                ast = globals.merge(&ast);
+            }
+
+            self.engine
+                .run_ast_with_scope(&mut self.scope, &ast)
+                .map_err(|err| format!("runtime error: {err:?}"))?;
+
+            for (i, line) in script.lines().enumerate() {
+                let mut line_escaped = String::new();
+                escape_html(&mut line_escaped, &line).unwrap();
+                output += &format!(r#"<span class="script-code">{}</span>"#, line_escaped);
+                output += "\n";
+                for (_, entry) in logbook.read().unwrap().iter().filter(|(l, _)| *l == i + 1) {
+                    let mut entry_escaped = String::new();
+                    escape_html(&mut entry_escaped, &format!("// > {entry}")).unwrap();
+                    output += &format!(r#"<span class="script-output">{}</span>"#, entry_escaped);
+                    output += "\n";
+                }
+            }
+            return Ok(output);
+        }
     }
 }
 
@@ -71,6 +104,7 @@ pub struct Meta {}
 enum CustomBlockType {
     Graph,
     Script,
+    ScriptGlobals,
     Test,
 }
 
@@ -94,6 +128,8 @@ fn error_event<'a>(msg: &str) -> Event<'a> {
 pub fn markdown_to_html(options: YamdrOptions, markdown: &str) -> (Meta, String) {
     let md_options = Options::all();
     let parser = Parser::new_ext(markdown, md_options);
+
+    let mut runtime = script::Runtime::new();
 
     let mut current_custom_block: Option<Result<CustomBlock, CustomBlockError>> = None;
 
@@ -151,11 +187,23 @@ pub fn markdown_to_html(options: YamdrOptions, markdown: &str) -> (Meta, String)
                     }
                 }
                 CustomBlockType::Script => {
-                    let output = script::run_block(text.to_string());
+                    let output = runtime.run_block(text);
                     match output {
                         Ok(output) => {
                             let tag = format!(r#"<div class="script"><pre>{}</pre></div>"#, output);
                             return Some(Event::Html(tag.into()));
+                        }
+                        Err(err) => {
+                            errors.push(err.clone());
+                            return Some(error_event(&err));
+                        }
+                    }
+                }
+                CustomBlockType::ScriptGlobals => {
+                    let output = runtime.add_globals(text);
+                    match output {
+                        Ok(_) => {
+                            return None;
                         }
                         Err(err) => {
                             errors.push(err.clone());
