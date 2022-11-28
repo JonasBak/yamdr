@@ -94,7 +94,7 @@ mod script {
                                 .into_typed_array::<Dynamic>()
                                 .unwrap()
                                 .iter()
-                                .map(|arg| format!("{arg:?}"))
+                                .map(|arg| arg.to_string())
                                 .collect(),
                         );
                         Ok(())
@@ -136,10 +136,14 @@ static STYLE: &str = r#"
 </style>
 "#;
 
+#[derive(Clone)]
 pub struct StandaloneOptions {}
 
+#[derive(Clone)]
 pub struct YamdrOptions {
     pub standalone: Option<StandaloneOptions>,
+    pub additional_head: Option<String>,
+    pub additional_body: Option<String>,
 }
 
 pub struct Meta {}
@@ -170,7 +174,7 @@ fn error_event<'a>(msg: &str) -> Event<'a> {
     return Event::Html(tag.into());
 }
 
-pub fn markdown_to_html(options: YamdrOptions, markdown: &str) -> (Meta, String) {
+pub fn markdown_to_html(options: &YamdrOptions, markdown: &str) -> (Meta, String) {
     let md_options = Options::all();
     let parser = Parser::new_ext(markdown, md_options);
 
@@ -299,30 +303,38 @@ pub fn markdown_to_html(options: YamdrOptions, markdown: &str) -> (Meta, String)
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);
 
-    if let Some(standalone_options) = options.standalone {
+    if let Some(standalone_options) = &options.standalone {
         html_output = format!(
             r#"
 <!DOCTYPE html>
 <html>
     <head>
         {}
+        {}
     </head>
     <body>
+        {}
         <div class="content">
             {}
         </div>
     </body>
 </html>"#,
-            STYLE, html_output
+            STYLE,
+            options.additional_head.as_deref().unwrap_or(""),
+            options.additional_body.as_deref().unwrap_or(""),
+            html_output
         );
     } else {
         html_output = format!(
             r#"
 {}
+{}
 <div class="content">
 {}
 </div>"#,
-            STYLE, html_output
+            STYLE,
+            options.additional_body.as_deref().unwrap_or(""),
+            html_output
         );
     }
 
