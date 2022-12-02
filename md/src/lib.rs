@@ -17,8 +17,8 @@ mod script {
 
     impl Runtime<'_> {
         pub fn new() -> Self {
-            let mut engine = Engine::new();
-            let mut scope = Scope::new();
+            let engine = Engine::new();
+            let scope = Scope::new();
             return Runtime {
                 engine,
                 scope,
@@ -35,8 +35,6 @@ mod script {
         }
         pub fn run_block(&mut self, script: &str) -> Result<String, String> {
             let mut output = String::new();
-
-            let mut printed = String::new();
 
             let logbook = Arc::new(RwLock::new(Vec::<(usize, String)>::new()));
 
@@ -73,6 +71,23 @@ mod script {
                 }
             }
             return Ok(output);
+        }
+        pub fn eval_line(&mut self, script: &str) -> Result<String, String> {
+            let mut ast = self
+                .engine
+                .compile(script)
+                .map_err(|err| format!("compilation error: {err:?}"))?;
+
+            if let Some(globals) = self.globals.as_ref() {
+                ast = globals.merge(&ast);
+            }
+
+            let value = self
+                .engine
+                .eval_ast_with_scope::<Dynamic>(&mut self.scope, &ast)
+                .map_err(|err| format!("runtime error: {err:?}"))?;
+
+            return Ok(format!("{script} // > {value}"));
         }
         pub fn generate_table(
             &mut self,
@@ -123,6 +138,36 @@ mod script {
 
 static STYLE: &str = r#"
 <style>
+    html {
+      font-family: sans;
+      font-size: 16px;
+      line-height: 1.5;
+    }
+    h1 {
+      text-decoration: underline;
+    }
+    td {
+      padding: 8px 12px;
+    }
+    code {
+      background-color: #dcdcdc;
+      padding: 0px 4px;
+      border-radius: 4px;
+    }
+    div.script > pre {
+      background-color: #dcdcdc;
+      padding: 20px;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-size: 12px;
+    }
+    .script-output {
+      font-weight: bold;
+    }
+    .content {
+      max-width: 1000px;
+      margin: auto;
+    }
     .script {
     }
     .script-code {
@@ -160,6 +205,7 @@ enum CustomBlockType {
 #[derive(Deserialize, Debug)]
 struct CustomBlock {
     t: CustomBlockType,
+    hidden_title: Option<String>,
 }
 
 #[derive(Debug)]
@@ -239,7 +285,10 @@ pub fn markdown_to_html(options: &YamdrOptions, markdown: &str) -> (Meta, String
                     let output = runtime.run_block(text);
                     match output {
                         Ok(output) => {
-                            let tag = format!(r#"<div class="script"><pre>{}</pre></div>"#, output);
+                            let mut tag = format!(r#"<div class="script"><pre>{}</pre></div>"#, output);
+                            if let Some(title) = block.hidden_title.as_ref() {
+                                tag = format!(r#"<details><summary>{}</summary>{}</details>"#, title, tag);
+                            }
                             return vec![Event::Html(tag.into())];
                         }
                         Err(err) => {
@@ -273,7 +322,7 @@ pub fn markdown_to_html(options: &YamdrOptions, markdown: &str) -> (Meta, String
                                 Event::End(Tag::TableCell),
                             ]).flatten());
                             events.push(Event::End(Tag::TableHead));
-                            events.extend(rows.into_iter().enumerate().map(|(i, row)| {
+                            events.extend(rows.into_iter().map(|row| {
                                 let mut events = Vec::new();
                                 events.push(Event::Start(Tag::TableRow));
                                 events.extend(row.iter().map(|cell|  vec![
@@ -297,13 +346,29 @@ pub fn markdown_to_html(options: &YamdrOptions, markdown: &str) -> (Meta, String
             }
             Vec::new()
         },
+        Event::Code(code) if code.starts_with("_") && code.ends_with("_") && code.len() > 2 => {
+            let code = &code[1..(code.len()-1)];
+            let output = runtime.eval_line(code);
+            match output {
+                Ok(output) => {
+                    let mut output_escaped = String::new();
+                    escape_html(&mut output_escaped, &output).unwrap();
+                    let tag = format!(r#"<code class="inline-script">{}</code>"#, output_escaped);
+                    return vec![Event::Html(tag.into())];
+                }
+                Err(err) => {
+                    errors.push(err.clone());
+                    return vec![error_event(&err)];
+                }
+            }
+        }
         _ => vec![event],
     }).flatten();
 
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);
 
-    if let Some(standalone_options) = &options.standalone {
+    if let Some(_standalone_options) = &options.standalone {
         html_output = format!(
             r#"
 <!DOCTYPE html>
