@@ -1,0 +1,20 @@
+kind: pipeline
+type: docker
+name: default
+
+steps:
+  - name: build-publish-cli
+    image: rust:1.65-alpine
+    environment:
+      GITEA_USER_TOKEN:
+        from_secret: gitea_user_token
+    commands:
+      - apk add curl gcc build-base
+      - cargo build -p yamdr-cli --release
+      - 'curl -v --user "ci:$GITEA_USER_TOKEN" -X DELETE https://git.devel.oavn.dev/api/packages/ci/generic/public/latest/yamdr || true'
+      - 'curl -v --user "ci:$GITEA_USER_TOKEN" -X PUT --upload-file ./target/release/yamdr-cli https://git.devel.oavn.dev/api/packages/ci/generic/public/latest/yamdr'
+
+
+trigger:
+  branch:
+    - main
