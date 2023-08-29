@@ -2,7 +2,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{routing::get, Router};
 use clap::{Parser, Subcommand};
 use futures::stream::{self, Stream};
-use md::{markdown_to_html, StandaloneOptions, YamdrOptions};
+use md::{render_markdown, Format, StandaloneOptions, YamdrOptions};
 use std::fs;
 use tokio_stream::StreamExt as _;
 
@@ -24,6 +24,10 @@ enum Commands {
     Render {
         /// output file or "-" for stdout
         output: String,
+        
+        /// Output format
+        #[arg(long)]
+        format: Option<String>,
     },
     /// Serve rendered file
     Serve {
@@ -60,14 +64,21 @@ async fn main() {
         standalone: Some(StandaloneOptions {}),
         additional_head: None,
         additional_body: None,
+        format: None,
     };
 
     match args.command {
-        Commands::Render { output } => {
+        Commands::Render { output, format } => {
+            options.format = match format.as_deref().unwrap_or("html") {
+                "md" => Some(Format::Md),
+                "html" => Some(Format::Html),
+                _ => panic!("unsupported format '{:?}'", format),
+            };
+
             let md = fs::read_to_string(&args.file)
                 .expect(&format!("failed to read file {}", args.file));
 
-            let (_, html) = markdown_to_html(&options, &md);
+            let (_, html) = render_markdown(&options, &md);
             if output == "-" {
                 println!("{html}");
             } else {
@@ -86,7 +97,7 @@ async fn main() {
                         let md = fs::read_to_string(&file)
                             .expect(&format!("failed to read file {}", &file));
 
-                        let (_, html) = markdown_to_html(&options, &md);
+                        let (_, html) = render_markdown(&options, &md);
 
                         axum::response::Html(html)
                     })
@@ -110,7 +121,7 @@ async fn main() {
                                 let md = fs::read_to_string(&file)
                                     .expect(&format!("failed to read file {}", &file));
 
-                                let (_, html) = markdown_to_html(&options, &md);
+                                let (_, html) = render_markdown(&options, &md);
                                 Some(html)
                             } else {
                                 None

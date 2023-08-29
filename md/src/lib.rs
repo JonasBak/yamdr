@@ -1,142 +1,73 @@
+mod html;
+mod md;
+mod script_block;
+
 use layout::backends::svg::SVGWriter;
 use layout::gv;
 use miniserde::{json, Deserialize};
-use pulldown_cmark::{escape::escape_html, html, CodeBlockKind, Event, Options, Parser, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
+use script_block::{ScriptBlock, ScriptState};
 
-mod script {
-    use pulldown_cmark::escape::escape_html;
-    use rhai::{plugin::Dynamic, Engine, Scope, AST};
-    use std::sync::Arc;
-    use std::sync::RwLock;
+trait CustomBlockState: Sized {
+    type Block: CustomBlock;
 
-    pub struct Runtime<'a> {
-        engine: Engine,
-        scope: Scope<'a>,
-        globals: Option<AST>,
-    }
+    fn initial_state() -> Self;
 
-    impl Runtime<'_> {
-        pub fn new() -> Self {
-            let engine = Engine::new();
-            let scope = Scope::new();
-            return Runtime {
-                engine,
-                scope,
-                globals: None,
-            };
-        }
-        pub fn add_globals(&mut self, script: &str) -> Result<(), String> {
-            let ast = self
-                .engine
-                .compile(script)
-                .map_err(|err| format!("compilation error: {err:?}"))?;
-            self.globals = Some(ast.clone_functions_only());
-            return Ok(());
-        }
-        pub fn run_block(&mut self, script: &str) -> Result<String, String> {
-            let mut output = String::new();
+    fn read_block(
+        &mut self,
+        header: &CustomBlockHeader,
+        input: &str,
+    ) -> Result<Option<Self::Block>, String>;
+}
 
-            let logbook = Arc::new(RwLock::new(Vec::<(usize, String)>::new()));
+trait CustomBlock {
+    fn to_events(&self, format: Format) -> Vec<Event<'static>>;
+}
 
-            let log = logbook.clone();
-            self.engine.on_debug(move |s, _, pos| {
-                log.write()
-                    .unwrap()
-                    .push((pos.line().unwrap_or(1), s.to_string()));
-            });
+#[derive(Clone)]
+pub enum CustomEvent {
+    ScriptBlock(ScriptBlock),
+}
 
-            let mut ast = self
-                .engine
-                .compile(script)
-                .map_err(|err| format!("compilation error: {err:?}"))?;
-
-            if let Some(globals) = self.globals.as_ref() {
-                ast = globals.merge(&ast);
-            }
-
-            self.engine
-                .run_ast_with_scope(&mut self.scope, &ast)
-                .map_err(|err| format!("runtime error: {err:?}"))?;
-
-            for (i, line) in script.lines().enumerate() {
-                let mut line_escaped = String::new();
-                escape_html(&mut line_escaped, &line).unwrap();
-                output += &format!(r#"<span class="script-code">{}</span>"#, line_escaped);
-                output += "\n";
-                for (_, entry) in logbook.read().unwrap().iter().filter(|(l, _)| *l == i + 1) {
-                    let mut entry_escaped = String::new();
-                    escape_html(&mut entry_escaped, &format!("// > {entry}")).unwrap();
-                    output += &format!(r#"<span class="script-output">{}</span>"#, entry_escaped);
-                    output += "\n";
-                }
-            }
-            return Ok(output);
-        }
-        pub fn eval_line(&mut self, script: &str) -> Result<String, String> {
-            let mut ast = self
-                .engine
-                .compile(script)
-                .map_err(|err| format!("compilation error: {err:?}"))?;
-
-            if let Some(globals) = self.globals.as_ref() {
-                ast = globals.merge(&ast);
-            }
-
-            let value = self
-                .engine
-                .eval_ast_with_scope::<Dynamic>(&mut self.scope, &ast)
-                .map_err(|err| format!("runtime error: {err:?}"))?;
-
-            return Ok(format!("{script} // > {value}"));
-        }
-        pub fn generate_table(
-            &mut self,
-            script: &str,
-        ) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
-            let mut engine = Engine::new();
-
-            let lines = Arc::new(RwLock::new(Vec::<Vec<String>>::new()));
-
-            {
-                let lines = lines.clone();
-                engine.register_raw_fn(
-                    "row",
-                    &[rhai::plugin::TypeId::of::<Vec<Dynamic>>()],
-                    move |_, args| {
-                        lines.write().unwrap().push(
-                            args[0]
-                                .clone()
-                                .into_typed_array::<Dynamic>()
-                                .unwrap()
-                                .iter()
-                                .map(|arg| arg.to_string())
-                                .collect(),
-                        );
-                        Ok(())
-                    },
-                );
-            }
-
-            let mut ast = engine
-                .compile(script)
-                .map_err(|err| format!("compilation error: {err:?}"))?;
-
-            if let Some(globals) = self.globals.as_ref() {
-                ast = globals.merge(&ast);
-            }
-
-            engine
-                .run_ast_with_scope(&mut self.scope, &ast)
-                .map_err(|err| format!("runtime error: {err:?}"))?;
-
-            let mut head = lines.read().unwrap().clone();
-            let rows = head.split_off(1);
-            return Ok((head.pop().unwrap(), rows));
+impl CustomEvent {
+    fn to_events(&self, format: Format) -> Vec<Event<'static>> {
+        match self {
+            CustomEvent::ScriptBlock(sb) => sb.to_events(format),
         }
     }
 }
 
-static STYLE: &str = r#"
+#[derive(Clone)]
+pub enum ExtendedEvent<'a> {
+    Standard(Event<'a>),
+    Custom(CustomEvent),
+    Separator(u16),
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub enum Format {
+    Html,
+    Md,
+}
+
+impl Format {
+    fn transform_extended_event(self, ee: ExtendedEvent) -> Vec<Event> {
+        let events = match ee {
+            ExtendedEvent::Standard(e) => vec![e],
+            ExtendedEvent::Custom(sb) => sb.to_events(self),
+            ExtendedEvent::Separator(_) => vec![],
+        };
+        events
+    }
+    fn render<'a>(self, events: impl Iterator<Item = Event<'a>>) -> String {
+        match self {
+            Format::Html => html::render(events),
+            Format::Md => md::render(events),
+        }
+    }
+}
+
+pub static STYLE: &str = r#"
 <style>
     html {
       font-family: sans;
@@ -189,21 +120,24 @@ pub struct YamdrOptions {
     pub standalone: Option<StandaloneOptions>,
     pub additional_head: Option<String>,
     pub additional_body: Option<String>,
+    pub format: Option<Format>,
 }
 
 pub struct Meta {}
 
 #[derive(Deserialize, Debug)]
-enum CustomBlockType {
+pub enum CustomBlockType {
     Graph,
     Script,
     ScriptGlobals,
     DynamicTable,
+    InlineScript,
+    Svg,
     Test,
 }
 
 #[derive(Deserialize, Debug)]
-struct CustomBlock {
+pub struct CustomBlockHeader {
     t: CustomBlockType,
     hidden_title: Option<String>,
 }
@@ -213,28 +147,61 @@ struct CustomBlockError {
     msg: String,
 }
 
-fn error_event<'a>(msg: &str) -> Event<'a> {
-    let mut escaped = "".to_string();
-    escape_html(&mut escaped, msg).unwrap();
-    let tag = format!(r#"<div class="error">{}</div>"#, escaped);
-    return Event::Html(tag.into());
+struct States {
+    script: ScriptState,
 }
 
-pub fn markdown_to_html(options: &YamdrOptions, markdown: &str) -> (Meta, String) {
+impl States {
+    fn new() -> Self {
+        States {
+            script: ScriptState::initial_state(),
+        }
+    }
+}
+
+fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
     let md_options = Options::all();
-    let parser = Parser::new_ext(markdown, md_options);
 
-    let mut runtime = script::Runtime::new();
+    let mut states = States::new();
 
-    let mut current_custom_block: Option<Result<CustomBlock, CustomBlockError>> = None;
+    let mut current_custom_block: Option<Result<CustomBlockHeader, CustomBlockError>> = None;
 
-    let mut errors = Vec::new();
+    let mut level = 0;
+    let mut element_i = 0;
 
-    let parser = parser.map(|event| match &event {
+    let parser = Parser::new_ext(markdown, md_options).map(|event| {
+        match &event {
+            Event::Start(_) => {
+                level += 1;
+                if level == 1 {
+                    return vec![Event::Start(Tag::FootnoteDefinition(format!("yamdr:{}", element_i).into())), event];
+                }
+            }
+            Event::End(_) => {
+                level -= 1;
+                if level == 0 {
+                    element_i += 1;
+                    return vec![event, Event::End(Tag::FootnoteDefinition(format!("yamdr:{}", element_i-1).into()))];
+                }
+            }
+            _ => {}
+        };
+        vec![event]
+    }).flatten().map(|event| match &event {
+        Event::Start(Tag::FootnoteDefinition(id))
+            if id.as_ref().starts_with("yamdr:") =>
+        {
+            vec![ExtendedEvent::Separator(str::parse(&id[6..]).unwrap())]
+        }
+        Event::End(Tag::FootnoteDefinition(id))
+            if id.as_ref().starts_with("yamdr:") =>
+        {
+            Vec::new()
+        }
         Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(prop)))
             if prop.as_ref().starts_with("{") =>
         {
-            let Ok(block) = json::from_str::<CustomBlock>(prop) else {
+            let Ok(block) = json::from_str::<CustomBlockHeader>(prop) else {
                 current_custom_block = Some(Err(CustomBlockError{msg: "Could not parse block head".into()}));
                 return Vec::new();
             };
@@ -253,92 +220,47 @@ pub fn markdown_to_html(options: &YamdrOptions, markdown: &str) -> (Meta, String
                     block
                 },
                 Err(err) => {
-                    errors.push(err.msg.clone());
-                    return vec![error_event(&err.msg)]
+                    todo!()
+                    // errors.push(err.msg.clone());
+                    // return vec![ExtendedEvent::Custom(CustomEvent::CustomBlockError(err.msg.clone()))]
                 }
             };
             match block.t {
                 CustomBlockType::Graph => {
-                    match gv::DotParser::new(text).process() {
-                        Ok(g) => {
-                            let mut gb = gv::GraphBuilder::new();
-                            gb.visit_graph(&g);
-                            let mut graph = gb.get();
-                            let mut svg = SVGWriter::new();
-                            graph.do_it(
-                                false,
-                                false,
-                                false,
-                                &mut svg,
-                            );
-                            let content = svg.finalize();
-                            return vec![Event::Html(content.into())];
-                        }
-                        Err(err) => {
-                            let msg = format!("error parsing graph block: {}", err);
-                            errors.push(msg.clone());
-                            return vec![error_event(&msg)];
-                        }
-                    }
+                    todo!()
+                    // match gv::DotParser::new(text).process() {
+                    //     Ok(g) => {
+                    //         let mut gb = gv::GraphBuilder::new();
+                    //         gb.visit_graph(&g);
+                    //         let mut graph = gb.get();
+                    //         let mut svg = SVGWriter::new();
+                    //         graph.do_it(
+                    //             false,
+                    //             false,
+                    //             false,
+                    //             &mut svg,
+                    //         );
+                    //         let content = svg.finalize();
+                    //         return vec![ExtendedEvent::Custom(CustomEvent::Svg(text.to_string(), content.into()))];
+                    //     }
+                    //     Err(err) => {
+                    //         let msg = format!("error parsing graph block: {}", err);
+                    //         errors.push(msg.clone());
+                    //         return vec![ExtendedEvent::Custom(CustomEvent::CustomBlockError(msg))]
+                    //     }
+                    // }
                 }
+                CustomBlockType::DynamicTable |
+                CustomBlockType::ScriptGlobals |
                 CustomBlockType::Script => {
-                    let output = runtime.run_block(text);
-                    match output {
-                        Ok(output) => {
-                            let mut tag = format!(r#"<div class="script"><pre>{}</pre></div>"#, output);
-                            if let Some(title) = block.hidden_title.as_ref() {
-                                tag = format!(r#"<details><summary>{}</summary>{}</details>"#, title, tag);
-                            }
-                            return vec![Event::Html(tag.into())];
+                    match states.script.read_block(block, text) {
+                        Ok(Some(block)) => {
+                            return vec![ExtendedEvent::Custom(CustomEvent::ScriptBlock(block))];
                         }
+                        Ok(None) => {},
                         Err(err) => {
-                            errors.push(err.clone());
-                            return vec![error_event(&err)];
-                        }
-                    }
-                }
-                CustomBlockType::ScriptGlobals => {
-                    let output = runtime.add_globals(text);
-                    match output {
-                        Ok(_) => {
-                            return Vec::new();
-                        }
-                        Err(err) => {
-                            errors.push(err.clone());
-                            return vec![error_event(&err)];
-                        }
-                    }
-                }
-                CustomBlockType::DynamicTable => {
-                    let rows = runtime.generate_table(text);
-                    match rows {
-                        Ok((head, rows)) => {
-                            let mut events = Vec::new();
-                            events.push(Event::Start(Tag::Table(head.iter().map(|_| pulldown_cmark::Alignment::None).collect())));
-                            events.push(Event::Start(Tag::TableHead));
-                            events.extend(head.iter().map(|cell|  vec![
-                                Event::Start(Tag::TableCell),
-                                Event::Text(cell.clone().into()),
-                                Event::End(Tag::TableCell),
-                            ]).flatten());
-                            events.push(Event::End(Tag::TableHead));
-                            events.extend(rows.into_iter().map(|row| {
-                                let mut events = Vec::new();
-                                events.push(Event::Start(Tag::TableRow));
-                                events.extend(row.iter().map(|cell|  vec![
-                                    Event::Start(Tag::TableCell),
-                                    Event::Text(cell.clone().into()),
-                                    Event::End(Tag::TableCell),
-                                ]).flatten());
-                                events.push(Event::End(Tag::TableRow));
-                                return events;
-                            }).flatten());
-                            events.push(Event::End(Tag::Table(head.iter().map(|_| pulldown_cmark::Alignment::None).collect())));
-                            return events;
-                        }
-                        Err(err) => {
-                            errors.push(err.clone());
-                            return vec![error_event(&err)];
+                            println!("{}", err);
+                            todo!()
                         }
                     }
                 }
@@ -348,29 +270,47 @@ pub fn markdown_to_html(options: &YamdrOptions, markdown: &str) -> (Meta, String
         },
         Event::Code(code) if code.starts_with("_") && code.ends_with("_") && code.len() > 2 => {
             let code = &code[1..(code.len()-1)];
-            let output = runtime.eval_line(code);
-            match output {
-                Ok(output) => {
-                    let mut output_escaped = String::new();
-                    escape_html(&mut output_escaped, &output).unwrap();
-                    let tag = format!(r#"<code class="inline-script">{}</code>"#, output_escaped);
-                    return vec![Event::Html(tag.into())];
+            match states.script.read_block(&CustomBlockHeader{t: CustomBlockType::InlineScript, hidden_title: None}, code) {
+                Ok(Some(block)) => {
+                    return vec![ExtendedEvent::Custom(CustomEvent::ScriptBlock(block))];
                 }
+                Ok(None) => unreachable!(),
                 Err(err) => {
-                    errors.push(err.clone());
-                    return vec![error_event(&err)];
+                    println!("{}", err);
+                    todo!()
                 }
             }
         }
-        _ => vec![event],
+        _ => vec![ExtendedEvent::Standard(event)],
     }).flatten();
 
-    let mut html_output = String::new();
-    html::push_html(&mut html_output, parser);
+    return parser.collect();
+}
 
-    if let Some(_standalone_options) = &options.standalone {
-        html_output = format!(
-            r#"
+pub fn render_markdown(options: &YamdrOptions, markdown: &str) -> (Meta, String) {
+    let md_options = Options::all();
+
+    let mut states = States::new();
+
+    let mut current_custom_block: Option<Result<CustomBlockHeader, CustomBlockError>> = None;
+
+    let mut level = 0;
+    let mut element_i = 0;
+
+    let format = options.format.unwrap_or(Format::Html);
+
+    let parser = parse_markdown(markdown).into_iter();
+
+    let parser = parser
+        .map(|ee| format.transform_extended_event(ee))
+        .flatten();
+
+    let mut output = format.render(parser);
+
+    if format == Format::Html {
+        if options.standalone.is_some() {
+            output = format!(
+                r#"
 <!DOCTYPE html>
 <html>
     <head>
@@ -384,26 +324,82 @@ pub fn markdown_to_html(options: &YamdrOptions, markdown: &str) -> (Meta, String
         </div>
     </body>
 </html>"#,
-            STYLE,
-            options.additional_head.as_deref().unwrap_or(""),
-            options.additional_body.as_deref().unwrap_or(""),
-            html_output
-        );
-    } else {
-        html_output = format!(
-            r#"
+                STYLE,
+                options.additional_head.as_deref().unwrap_or(""),
+                options.additional_body.as_deref().unwrap_or(""),
+                output
+            );
+        } else {
+            output = format!(
+                r#"
 {}
 {}
 <div class="content">
 {}
 </div>"#,
-            STYLE,
-            options.additional_body.as_deref().unwrap_or(""),
-            html_output
-        );
+                STYLE,
+                options.additional_body.as_deref().unwrap_or(""),
+                output
+            );
+        }
     }
 
     let meta = Meta {};
 
-    (meta, html_output)
+    (meta, output)
+}
+
+pub struct MarkdownBlock {
+    pub id: u16,
+    pub html: String,
+    pub markdown: String,
+}
+
+pub struct MarkdownDocumentBlocks {
+    pub css: String,
+    pub blocks: Vec<MarkdownBlock>,
+}
+
+pub fn render_blocks(markdown: &str) -> MarkdownDocumentBlocks {
+    let html = Format::Html;
+    let md = Format::Md;
+    let blocks = parse_markdown(markdown)
+        .into_iter()
+        .fold(Vec::new(), |mut acc, x| {
+            match x {
+                ExtendedEvent::Separator(id) => {
+                    acc.push((id, Vec::new()));
+                }
+                _ => {
+                    acc.last_mut().unwrap().1.push(x);
+                }
+            }
+            acc
+        })
+        .into_iter()
+        .map(|(id, events)| {
+            let html = html.render(
+                events
+                    .clone()
+                    .into_iter()
+                    .map(|ee| html.transform_extended_event(ee))
+                    .flatten(),
+            );
+            let markdown = md.render(
+                events
+                    .into_iter()
+                    .map(|ee| md.transform_extended_event(ee))
+                    .flatten(),
+            );
+            MarkdownBlock {
+                id,
+                html,
+                markdown,
+            }
+        })
+        .collect();
+    return MarkdownDocumentBlocks {
+        css: "".into(),
+        blocks,
+    };
 }
