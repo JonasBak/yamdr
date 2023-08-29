@@ -2,8 +2,8 @@ mod html;
 mod md;
 mod script_block;
 
-use layout::backends::svg::SVGWriter;
-use layout::gv;
+
+
 use miniserde::{json, Deserialize};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
 use script_block::{ScriptBlock, ScriptState};
@@ -219,7 +219,7 @@ fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
                 Ok(block) => {
                     block
                 },
-                Err(err) => {
+                Err(_err) => {
                     todo!()
                     // errors.push(err.msg.clone());
                     // return vec![ExtendedEvent::Custom(CustomEvent::CustomBlockError(err.msg.clone()))]
@@ -288,15 +288,6 @@ fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
 }
 
 pub fn render_markdown(options: &YamdrOptions, markdown: &str) -> (Meta, String) {
-    let md_options = Options::all();
-
-    let mut states = States::new();
-
-    let mut current_custom_block: Option<Result<CustomBlockHeader, CustomBlockError>> = None;
-
-    let mut level = 0;
-    let mut element_i = 0;
-
     let format = options.format.unwrap_or(Format::Html);
 
     let parser = parse_markdown(markdown).into_iter();

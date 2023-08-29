@@ -1,4 +1,4 @@
-use pulldown_cmark::{escape::escape_html, html, CodeBlockKind, Event, Options, Parser, Tag};
+use pulldown_cmark::{html, Event};
 
 pub fn render<'a>(events: impl Iterator<Item = Event<'a>>) -> String {
     let mut html_output = String::new();

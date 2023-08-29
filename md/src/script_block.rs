@@ -1,5 +1,5 @@
 use crate::{CustomBlock, CustomBlockHeader, CustomBlockState, CustomBlockType, Format};
-use pulldown_cmark::{escape::escape_html, CodeBlockKind, Event, Options, Parser, Tag};
+use pulldown_cmark::{escape::escape_html, CodeBlockKind, Event, Tag};
 use rhai::{plugin::Dynamic, Engine, Scope, AST};
 use std::sync::Arc;
 use std::sync::RwLock;

@@ -1,8 +1,8 @@
 use pulldown_cmark::{
-    escape::escape_html, html, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag,
+    CodeBlockKind, Event, HeadingLevel, Tag,
 };
 
-use crate::ExtendedEvent;
+
 
 fn start_tag(tag: &Tag, parent_tags: &Vec<Tag>, event_count: u64) -> String {
     match tag {
@@ -37,7 +37,7 @@ fn start_tag(tag: &Tag, parent_tags: &Vec<Tag>, event_count: u64) -> String {
     }
 }
 
-fn end_tag(tag: &Tag, parent_tags: &Vec<Tag>, event_count: u64) -> String {
+fn end_tag(tag: &Tag, parent_tags: &Vec<Tag>, _event_count: u64) -> String {
     match tag {
         Tag::Heading(_, _, _) => "\n\n".into(),
         Tag::CodeBlock(_) => "```\n\n".into(),
