@@ -1,6 +1,8 @@
 use crate::{CustomBlock, CustomBlockHeader, CustomBlockState, CustomBlockType, Format};
 use pulldown_cmark::{escape::escape_html, CodeBlockKind, Event, Tag};
 use rhai::{plugin::Dynamic, Engine, Scope, AST};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -19,12 +21,19 @@ enum OutputType {
     RunningScript(Vec<LineType>),
     Table((String, Vec<String>, Vec<Vec<String>>)),
     Inline(String),
+    Data(DataBlock),
 }
 
 #[derive(Debug, PartialEq, Clone)]
 enum LineType {
     Code(String),
     Output(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DataBlock {
+    name: String,
+    data: Vec<BTreeMap<String, String>>,
 }
 
 impl CustomBlockState for ScriptState {
@@ -83,6 +92,15 @@ impl CustomBlockState for ScriptState {
                 })),
                 Err(err) => Err(err),
             },
+            CustomBlockType::Data => {
+                let data: DataBlock = serde_yaml::from_str(input)
+                    .map_err(|err| format!("failed to parse block: {}", err.to_string()))?;
+                let output = self.runtime.add_constant(data.clone());
+                Ok(Some(Self::Block {
+                    hidden_title: None,
+                    output: OutputType::Data(data),
+                }))
+            }
             _ => {
                 return Err(format!(
                     "Unsupported block type for ScriptBlock: {:?}",
@@ -148,51 +166,7 @@ impl CustomBlock for ScriptBlock {
                 events
             }
             (format, OutputType::Table((code, head, rows))) => {
-                let mut events = Vec::new();
-                events.push(Event::Start(Tag::Table(
-                    head.iter()
-                        .map(|_| pulldown_cmark::Alignment::None)
-                        .collect(),
-                )));
-                events.push(Event::Start(Tag::TableHead));
-                events.extend(
-                    head.iter()
-                        .map(|cell| {
-                            vec![
-                                Event::Start(Tag::TableCell),
-                                Event::Text(cell.clone().into()),
-                                Event::End(Tag::TableCell),
-                            ]
-                        })
-                        .flatten(),
-                );
-                events.push(Event::End(Tag::TableHead));
-                events.extend(
-                    rows.into_iter()
-                        .map(|row| {
-                            let mut events = Vec::new();
-                            events.push(Event::Start(Tag::TableRow));
-                            events.extend(
-                                row.iter()
-                                    .map(|cell| {
-                                        vec![
-                                            Event::Start(Tag::TableCell),
-                                            Event::Text(cell.clone().into()),
-                                            Event::End(Tag::TableCell),
-                                        ]
-                                    })
-                                    .flatten(),
-                            );
-                            events.push(Event::End(Tag::TableRow));
-                            return events;
-                        })
-                        .flatten(),
-                );
-                events.push(Event::End(Tag::Table(
-                    head.iter()
-                        .map(|_| pulldown_cmark::Alignment::None)
-                        .collect(),
-                )));
+                let events = build_table(head, rows);
                 match format {
                     Format::Html => events,
                     Format::Md => {
@@ -215,6 +189,47 @@ impl CustomBlock for ScriptBlock {
                         vec![
                             Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(props.into()))),
                             Event::Text(code.into()),
+                            Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(props.into()))),
+                        ]
+                    }
+                }
+            }
+            (format, OutputType::Data(data)) => {
+                let mut fields = BTreeMap::new();
+                for data in &data.data {
+                    for field in data.keys() {
+                        fields.insert(field.clone(), true);
+                    }
+                }
+                let head: Vec<_> = fields.keys().cloned().collect();
+                let rows = data
+                    .data
+                    .iter()
+                    .map(|data| {
+                        head.iter()
+                            .map(|field| data.get(field).cloned().unwrap_or_default())
+                            .collect()
+                    })
+                    .collect();
+                let events = build_table(&head, &rows);
+                match format {
+                    Format::Html => events,
+                    Format::Md => {
+                        let table_output = crate::md::render(events.into_iter());
+                        let mut output = serde_yaml::to_string(data).unwrap_or("".to_string());
+                        output += "\n";
+                        output += &table_output
+                            .lines()
+                            .filter(|line| line.len() > 0)
+                            .map(|line| format!("# {}", line))
+                            .collect::<Vec<String>>()
+                            .join("\n");
+                        output += "\n";
+
+                        let props = r#"{"t": "Data"}"#;
+                        vec![
+                            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(props.into()))),
+                            Event::Text(output.into()),
                             Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(props.into()))),
                         ]
                     }
@@ -352,6 +367,60 @@ impl Runtime {
         let rows = head.split_off(1);
         return Ok((head.pop().unwrap(), rows));
     }
+    fn add_constant(&mut self, data: DataBlock) {
+        let values: Vec<rhai::Dynamic> = data.data.into_iter().map(|v| v.into()).collect();
+        self.scope
+            .push_constant_dynamic(data.name, values.as_slice().into());
+    }
+}
+
+fn build_table(head: &Vec<String>, rows: &Vec<Vec<String>>) -> Vec<Event<'static>> {
+    let mut events = Vec::new();
+    events.push(Event::Start(Tag::Table(
+        head.iter()
+            .map(|_| pulldown_cmark::Alignment::None)
+            .collect(),
+    )));
+    events.push(Event::Start(Tag::TableHead));
+    events.extend(
+        head.iter()
+            .map(|cell| {
+                vec![
+                    Event::Start(Tag::TableCell),
+                    Event::Text(cell.clone().into()),
+                    Event::End(Tag::TableCell),
+                ]
+            })
+            .flatten(),
+    );
+    events.push(Event::End(Tag::TableHead));
+    events.extend(
+        rows.into_iter()
+            .map(|row| {
+                let mut events = Vec::new();
+                events.push(Event::Start(Tag::TableRow));
+                events.extend(
+                    row.iter()
+                        .map(|cell| {
+                            vec![
+                                Event::Start(Tag::TableCell),
+                                Event::Text(cell.clone().into()),
+                                Event::End(Tag::TableCell),
+                            ]
+                        })
+                        .flatten(),
+                );
+                events.push(Event::End(Tag::TableRow));
+                return events;
+            })
+            .flatten(),
+    );
+    events.push(Event::End(Tag::Table(
+        head.iter()
+            .map(|_| pulldown_cmark::Alignment::None)
+            .collect(),
+    )));
+    events
 }
 
 #[cfg(test)]
@@ -503,6 +572,43 @@ row([7, 8, 9]);
     }
 
     #[test]
+    fn block_type_data() {
+        let data = r#"
+name: testdata
+data:
+- fieldA: 1
+  fieldB: 2
+- fieldA: 3
+  fieldB: 4
+"#;
+        let mut state = ScriptState::initial_state();
+        state
+            .read_block(
+                &CustomBlockHeader {
+                    t: CustomBlockType::Data,
+                    hidden_title: None,
+                },
+                data,
+            )
+            .unwrap();
+
+        let script = r#"testdata[1]["fieldA"]"#;
+        let block = state.read_block(
+            &CustomBlockHeader {
+                t: CustomBlockType::InlineScript,
+                hidden_title: None,
+            },
+            script,
+        );
+        let line = if let OutputType::Inline(line) = block.unwrap().unwrap().output {
+            line
+        } else {
+            panic!("output type should be OutputType::Inline");
+        };
+        assert_eq!(line, r#"testdata[1]["fieldA"] // > 3"#);
+    }
+
+    #[test]
     fn render_markdown() {
         let documents = [
             (
@@ -592,6 +698,40 @@ row([1,2,3,4]);
 
 "#,
             ),
+            (
+                r#"```{"t": "Data"}
+name: test
+data:
+- a: 1
+  b: 2
+- a: 3
+  c: 4
+- a: 5
+  b: 6
+  c: 7
+```
+
+"#,
+                r#"```{"t": "Data"}
+name: test
+data:
+- a: '1'
+  b: '2'
+- a: '3'
+  c: '4'
+- a: '5'
+  b: '6'
+  c: '7'
+
+# | a | b | c |
+# |---|---|---|
+# | 1 | 2 |  |
+# | 3 |  | 4 |
+# | 5 | 6 | 7 |
+```
+
+"#,
+            ),
         ];
         let format = crate::Format::Md;
         for (document, expected) in documents {
@@ -600,6 +740,8 @@ row([1,2,3,4]);
                 .map(|ee| format.transform_extended_event(ee))
                 .flatten();
             let output = format.render(events);
+
+            println!("Wanted:\n{}\nGot:\n{}", expected, output);
 
             assert_eq!(expected, output);
         }

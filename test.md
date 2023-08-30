@@ -38,3 +38,13 @@ debug(fib(5));
 ```
 
 `_x_`
+
+```{"t": "Data"}
+name: test
+data:
+- fieldA: a
+  fieldB: b
+- fieldA: a
+  fieldB: b
+  fieldC: c
+```

@@ -130,6 +130,7 @@ pub enum CustomBlockType {
     Graph,
     Script,
     ScriptGlobals,
+    Data,
     DynamicTable,
     InlineScript,
     Svg,
@@ -242,7 +243,8 @@ fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
                 }
                 CustomBlockType::DynamicTable |
                 CustomBlockType::ScriptGlobals |
-                CustomBlockType::Script => {
+                CustomBlockType::Script |
+                CustomBlockType::Data => {
                     match states.script.read_block(block, text) {
                         Ok(Some(block)) => {
                             return vec![ExtendedEvent::Custom(CustomEvent::ScriptBlock(block))];
