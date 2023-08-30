@@ -1,9 +1,9 @@
+mod graph_block;
 mod html;
 mod md;
 mod script_block;
 
-
-
+use graph_block::{GraphBlock, GraphState};
 use miniserde::{json, Deserialize};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
 use script_block::{ScriptBlock, ScriptState};
@@ -27,12 +27,14 @@ trait CustomBlock {
 #[derive(Clone)]
 pub enum CustomEvent {
     ScriptBlock(ScriptBlock),
+    GraphBlock(GraphBlock),
 }
 
 impl CustomEvent {
     fn to_events(&self, format: Format) -> Vec<Event<'static>> {
         match self {
             CustomEvent::ScriptBlock(sb) => sb.to_events(format),
+            CustomEvent::GraphBlock(gb) => gb.to_events(format),
         }
     }
 }
@@ -68,7 +70,6 @@ impl Format {
 }
 
 pub static STYLE: &str = r#"
-<style>
     html {
       font-family: sans;
       font-size: 16px;
@@ -109,7 +110,6 @@ pub static STYLE: &str = r#"
         background-color: red;
         padding: 10px;
     }
-</style>
 "#;
 
 #[derive(Clone)]
@@ -149,12 +149,14 @@ struct CustomBlockError {
 
 struct States {
     script: ScriptState,
+    graph: GraphState,
 }
 
 impl States {
     fn new() -> Self {
         States {
             script: ScriptState::initial_state(),
+            graph: GraphState::initial_state(),
         }
     }
 }
@@ -227,28 +229,16 @@ fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
             };
             match block.t {
                 CustomBlockType::Graph => {
-                    todo!()
-                    // match gv::DotParser::new(text).process() {
-                    //     Ok(g) => {
-                    //         let mut gb = gv::GraphBuilder::new();
-                    //         gb.visit_graph(&g);
-                    //         let mut graph = gb.get();
-                    //         let mut svg = SVGWriter::new();
-                    //         graph.do_it(
-                    //             false,
-                    //             false,
-                    //             false,
-                    //             &mut svg,
-                    //         );
-                    //         let content = svg.finalize();
-                    //         return vec![ExtendedEvent::Custom(CustomEvent::Svg(text.to_string(), content.into()))];
-                    //     }
-                    //     Err(err) => {
-                    //         let msg = format!("error parsing graph block: {}", err);
-                    //         errors.push(msg.clone());
-                    //         return vec![ExtendedEvent::Custom(CustomEvent::CustomBlockError(msg))]
-                    //     }
-                    // }
+                    match states.graph.read_block(block, text) {
+                        Ok(Some(block)) => {
+                            return vec![ExtendedEvent::Custom(CustomEvent::GraphBlock(block))];
+                        }
+                        Ok(None) => {},
+                        Err(err) => {
+                            println!("{}", err);
+                            todo!()
+                        }
+                    }
                 }
                 CustomBlockType::DynamicTable |
                 CustomBlockType::ScriptGlobals |
@@ -305,7 +295,9 @@ pub fn render_markdown(options: &YamdrOptions, markdown: &str) -> (Meta, String)
 <!DOCTYPE html>
 <html>
     <head>
-        {}
+        <style>
+            {}
+        </style>
         {}
     </head>
     <body>
@@ -323,7 +315,9 @@ pub fn render_markdown(options: &YamdrOptions, markdown: &str) -> (Meta, String)
         } else {
             output = format!(
                 r#"
+<style>
 {}
+</style>
 {}
 <div class="content">
 {}
@@ -349,6 +343,18 @@ pub struct MarkdownBlock {
 pub struct MarkdownDocumentBlocks {
     pub css: String,
     pub blocks: Vec<MarkdownBlock>,
+}
+
+impl MarkdownDocumentBlocks {
+    pub fn rerender(&mut self) {
+        let markdown_document = self
+            .blocks
+            .iter()
+            .map(|block| block.markdown.as_str())
+            .collect::<Vec<&str>>()
+            .join("\n");
+        *self = render_blocks(&markdown_document);
+    }
 }
 
 pub fn render_blocks(markdown: &str) -> MarkdownDocumentBlocks {
@@ -382,15 +388,95 @@ pub fn render_blocks(markdown: &str) -> MarkdownDocumentBlocks {
                     .map(|ee| md.transform_extended_event(ee))
                     .flatten(),
             );
-            MarkdownBlock {
-                id,
-                html,
-                markdown,
-            }
+            MarkdownBlock { id, html, markdown }
         })
         .collect();
     return MarkdownDocumentBlocks {
-        css: "".into(),
+        css: STYLE.into(),
         blocks,
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_blocks() {
+        let document = r#"
+# Header
+
+A paragraph.
+
+```
+Code block
+```
+
+New paragraph
+
+- List
+- List
+"#;
+        let blocks = render_blocks(document);
+        assert_eq!(blocks.blocks.len(), 5);
+        assert_eq!(
+            blocks.blocks[0].markdown,
+            r#"# Header
+
+"#
+        );
+        assert_eq!(
+            blocks.blocks[1].markdown,
+            r#"A paragraph.
+
+"#
+        );
+        assert_eq!(
+            blocks.blocks[2].markdown,
+            r#"```
+Code block
+```
+
+"#
+        );
+        assert_eq!(
+            blocks.blocks[3].markdown,
+            r#"New paragraph
+
+"#
+        );
+        assert_eq!(
+            blocks.blocks[4].markdown,
+            r#"- List
+- List
+
+"#
+        );
+    }
+
+    #[test]
+    fn test_rerender_markdown_document_blocks() {
+        let document = r#"
+# Header
+
+A paragraph.
+
+```
+Code block
+```
+
+New paragraph
+
+- List
+- List
+"#;
+        let mut blocks = render_blocks(document);
+        assert_eq!(blocks.blocks.len(), 5);
+        blocks.blocks[1].markdown = r#"A changed paragraph.
+
+New paragraph in same block"#
+            .to_string();
+        blocks.rerender();
+        assert_eq!(blocks.blocks.len(), 6);
+    }
 }

@@ -1,13 +1,5 @@
 # Yet another markdown renderer
 
-```{"t": "Test"}
-abc
-```
-
-```{"t": "Graph"}
-abc
-```
-
 ```{"t": "Graph"}
 digraph D {
 
@@ -25,10 +17,6 @@ digraph D {
   D -- E;
 
 }
-```
-
-```{"t": "aa"}
-abc
 ```
 
 ```{"t": "ScriptGlobals"}
