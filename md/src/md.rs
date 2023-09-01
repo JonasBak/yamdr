@@ -33,6 +33,9 @@ fn start_tag(tag: &Tag, parent_tags: &Vec<Tag>, event_count: u64) -> String {
             }
         }
         Tag::Link(_, _, _) => "[".into(),
+        Tag::Strong => "**".into(),
+        Tag::Emphasis => "*".into(),
+        Tag::Strikethrough => "~~".into(),
         _ => "".into(),
     }
 }
@@ -59,6 +62,9 @@ fn end_tag(tag: &Tag, parent_tags: &Vec<Tag>, _event_count: u64) -> String {
         Tag::List(_) if !matches!(parent_tags.last(), Some(Tag::Item)) => "\n\n".into(),
         Tag::Link(_, dest, _) => format!("]({})", dest),
         Tag::Paragraph => "\n\n".into(),
+        Tag::Strong => "**".into(),
+        Tag::Emphasis => "*".into(),
+        Tag::Strikethrough => "~~".into(),
         _ => "".into(),
     }
 }
@@ -135,6 +141,18 @@ mod tests {
 
 "#,
             r#"###### Heading 6
+
+"#,
+            r#"Paragraph with **bold**.
+
+"#,
+            r#"Paragraph with *italic*.
+
+"#,
+            r#"Paragraph with ***bold and italic***.
+
+"#,
+            r#"Paragraph with ~~strikethrough~~.
 
 "#,
             r#"```

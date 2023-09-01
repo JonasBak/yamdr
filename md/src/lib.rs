@@ -4,9 +4,9 @@ mod md;
 mod script_block;
 
 use graph_block::{GraphBlock, GraphState};
-use miniserde::{json, Deserialize};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
 use script_block::{ScriptBlock, ScriptState};
+use serde::{Deserialize, Serialize};
 
 trait CustomBlockState: Sized {
     type Block: CustomBlock;
@@ -204,7 +204,7 @@ fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
         Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(prop)))
             if prop.as_ref().starts_with("{") =>
         {
-            let Ok(block) = json::from_str::<CustomBlockHeader>(prop) else {
+            let Ok(block) = serde_json::from_str::<CustomBlockHeader>(prop) else {
                 current_custom_block = Some(Err(CustomBlockError{msg: "Could not parse block head".into()}));
                 return Vec::new();
             };
@@ -336,12 +336,14 @@ pub fn render_markdown(options: &YamdrOptions, markdown: &str) -> (Meta, String)
     (meta, output)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarkdownBlock {
     pub id: u16,
     pub html: String,
     pub markdown: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarkdownDocumentBlocks {
     pub css: String,
     pub blocks: Vec<MarkdownBlock>,

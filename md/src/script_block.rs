@@ -14,6 +14,7 @@ pub struct ScriptBlock {
 
 pub struct ScriptState {
     runtime: Runtime,
+    data: BTreeMap<String, DataBlock>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +49,7 @@ impl CustomBlockState for ScriptState {
                 scope,
                 globals: None,
             },
+            data: BTreeMap::new(),
         };
     }
 
@@ -96,6 +98,7 @@ impl CustomBlockState for ScriptState {
                 let data: DataBlock = serde_yaml::from_str(input)
                     .map_err(|err| format!("failed to parse block: {}", err.to_string()))?;
                 let output = self.runtime.add_constant(data.clone());
+                self.data.insert(data.name.clone(), data.clone());
                 Ok(Some(Self::Block {
                     hidden_title: None,
                     output: OutputType::Data(data),
@@ -201,14 +204,20 @@ impl CustomBlock for ScriptBlock {
                         fields.insert(field.clone(), true);
                     }
                 }
-                let head: Vec<_> = fields.keys().cloned().collect();
+                let mut head = vec!["#".to_string()];
+                head.extend(fields.keys().cloned());
                 let rows = data
                     .data
                     .iter()
-                    .map(|data| {
-                        head.iter()
-                            .map(|field| data.get(field).cloned().unwrap_or_default())
-                            .collect()
+                    .enumerate()
+                    .map(|(i, data)| {
+                        let mut row = vec![(i + 1).to_string()];
+                        row.extend(
+                            head.iter()
+                                .skip(1)
+                                .map(|field| data.get(field).cloned().unwrap_or_default()),
+                        );
+                        row
                     })
                     .collect();
                 let events = build_table(&head, &rows);
@@ -723,11 +732,11 @@ data:
   b: '6'
   c: '7'
 
-# | a | b | c |
-# |---|---|---|
-# | 1 | 2 |  |
-# | 3 |  | 4 |
-# | 5 | 6 | 7 |
+# | # | a | b | c |
+# |---|---|---|---|
+# | 1 | 1 | 2 |  |
+# | 2 | 3 |  | 4 |
+# | 3 | 5 | 6 | 7 |
 ```
 
 "#,
