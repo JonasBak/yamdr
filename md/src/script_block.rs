@@ -1,4 +1,6 @@
-use crate::{CustomBlock, CustomBlockHeader, CustomBlockState, CustomBlockType, Format};
+use crate::{
+    utils::html_hide_with_title, CustomBlock, CustomBlockHeader, CustomBlockState, Format,
+};
 use pulldown_cmark::{escape::escape_html, CodeBlockKind, Event, Tag};
 use rhai::{plugin::Dynamic, Engine, Scope, AST};
 use serde::{Deserialize, Serialize};
@@ -8,13 +10,19 @@ use std::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct ScriptBlock {
-    hidden_title: Option<String>,
     output: OutputType,
+    header: ScriptBlockHeader,
 }
 
 pub struct ScriptState {
     runtime: Runtime,
     data: BTreeMap<String, DataBlock>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ScriptBlockHeader {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hidden_title: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,8 +40,15 @@ enum LineType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct DataBlockPredefinedField {
+    name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DataBlock {
     name: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    fields: Vec<DataBlockPredefinedField>,
     data: Vec<BTreeMap<String, String>>,
 }
 
@@ -58,56 +73,56 @@ impl CustomBlockState for ScriptState {
         header: &CustomBlockHeader,
         input: &str,
     ) -> Result<Option<Self::Block>, String> {
-        match header.t {
-            CustomBlockType::Script => {
+        match header {
+            CustomBlockHeader::Script(header) => {
                 let output = self.runtime.run_block(input);
                 match output {
                     Ok(output) => Ok(Some(Self::Block {
-                        hidden_title: header.hidden_title.clone(),
                         output: OutputType::RunningScript(output),
+                        header: header.clone(),
                     })),
                     Err(err) => Err(err),
                 }
             }
-            CustomBlockType::ScriptGlobals => {
+            CustomBlockHeader::ScriptGlobals(_) => {
                 let output = self.runtime.add_globals(input);
                 match output {
                     Ok(_) => return Ok(None),
                     Err(err) => return Err(err),
                 }
             }
-            CustomBlockType::DynamicTable => match self.runtime.generate_table(input) {
+            CustomBlockHeader::DynamicTable(header) => match self.runtime.generate_table(input) {
                 Ok((head, rows)) => Ok(Some(Self::Block {
-                    hidden_title: header.hidden_title.clone(),
                     output: OutputType::Table((input.into(), head, rows)),
+                    header: header.clone(),
                 })),
                 Err(err) => Err(err),
             },
-            CustomBlockType::InlineScript => match self.runtime.eval_line(input) {
+            CustomBlockHeader::InlineScript => match self.runtime.eval_line(input) {
                 Ok(output) => Ok(Some(Self::Block {
-                    hidden_title: None,
                     output: OutputType::Inline(format!(
                         "{} // > {}",
                         input.split(" // >").next().unwrap_or(""),
                         output
                     )),
+                    header: ScriptBlockHeader::default(),
                 })),
                 Err(err) => Err(err),
             },
-            CustomBlockType::Data => {
+            CustomBlockHeader::Data(header) => {
                 let data: DataBlock = serde_yaml::from_str(input)
                     .map_err(|err| format!("failed to parse block: {}", err.to_string()))?;
                 let output = self.runtime.add_constant(data.clone());
                 self.data.insert(data.name.clone(), data.clone());
                 Ok(Some(Self::Block {
-                    hidden_title: None,
                     output: OutputType::Data(data),
+                    header: header.clone(),
                 }))
             }
             _ => {
                 return Err(format!(
                     "Unsupported block type for ScriptBlock: {:?}",
-                    header.t
+                    header
                 ))
             }
         }
@@ -142,12 +157,19 @@ impl CustomBlock for ScriptBlock {
                 }
                 events.push(Event::Html(r#"</pre></div>"#.into()));
 
-                events
+                if let Some(title) = self.header.hidden_title.as_ref() {
+                    html_hide_with_title(title.to_string(), events)
+                } else {
+                    events
+                }
             }
             (Format::Md, OutputType::RunningScript(lines)) => {
-                let props = r#"{"t": "Script"}"#;
+                let props: pulldown_cmark::CowStr =
+                    serde_json::to_string(&CustomBlockHeader::Script(self.header.clone()))
+                        .unwrap()
+                        .into();
                 let mut events = vec![Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(
-                    props.into(),
+                    props.clone(),
                 )))];
                 let mut code = "".to_string();
                 for line in lines {
@@ -162,9 +184,7 @@ impl CustomBlock for ScriptBlock {
                     code += "\n";
                 }
                 events.push(Event::Text(code.into()));
-                events.push(Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(
-                    props.into(),
-                ))));
+                events.push(Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(props))));
 
                 events
             }
@@ -188,11 +208,15 @@ impl CustomBlock for ScriptBlock {
                             .join("\n");
                         code += "\n";
 
-                        let props = r#"{"t": "DynamicTable"}"#;
+                        let props: pulldown_cmark::CowStr = serde_json::to_string(
+                            &CustomBlockHeader::DynamicTable(self.header.clone()),
+                        )
+                        .unwrap()
+                        .into();
                         vec![
-                            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(props.into()))),
+                            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(props.clone()))),
                             Event::Text(code.into()),
-                            Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(props.into()))),
+                            Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(props))),
                         ]
                     }
                 }
@@ -222,7 +246,13 @@ impl CustomBlock for ScriptBlock {
                     .collect();
                 let events = build_table(&head, &rows);
                 match format {
-                    Format::Html => events,
+                    Format::Html => {
+                        if let Some(title) = self.header.hidden_title.as_ref() {
+                            html_hide_with_title(title.to_string(), events)
+                        } else {
+                            events
+                        }
+                    }
                     Format::Md => {
                         let table_output = crate::md::render(events.into_iter());
                         let mut output = serde_yaml::to_string(data).unwrap_or("".to_string());
@@ -235,11 +265,14 @@ impl CustomBlock for ScriptBlock {
                             .join("\n");
                         output += "\n";
 
-                        let props = r#"{"t": "Data"}"#;
+                        let props: pulldown_cmark::CowStr =
+                            serde_json::to_string(&CustomBlockHeader::Data(self.header.clone()))
+                                .unwrap()
+                                .into();
                         vec![
-                            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(props.into()))),
+                            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(props.clone()))),
                             Event::Text(output.into()),
-                            Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(props.into()))),
+                            Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(props))),
                         ]
                     }
                 }
@@ -446,10 +479,7 @@ debug(x + 1);
 "#;
         let mut state = ScriptState::initial_state();
         let block = state.read_block(
-            &CustomBlockHeader {
-                t: CustomBlockType::Script,
-                hidden_title: None,
-            },
+            &CustomBlockHeader::Script(ScriptBlockHeader::default()),
             script,
         );
         let lines = if let OutputType::RunningScript(lines) = block.unwrap().unwrap().output {
@@ -473,13 +503,7 @@ debug(x + 1);
     fn block_type_inline_script() {
         let script = r#"4 + 5"#;
         let mut state = ScriptState::initial_state();
-        let block = state.read_block(
-            &CustomBlockHeader {
-                t: CustomBlockType::InlineScript,
-                hidden_title: None,
-            },
-            script,
-        );
+        let block = state.read_block(&CustomBlockHeader::InlineScript, script);
         let line = if let OutputType::Inline(line) = block.unwrap().unwrap().output {
             line
         } else {
@@ -497,22 +521,13 @@ fn test(n) {
 "#;
         let mut state = ScriptState::initial_state();
         let block = state.read_block(
-            &CustomBlockHeader {
-                t: CustomBlockType::ScriptGlobals,
-                hidden_title: None,
-            },
+            &CustomBlockHeader::ScriptGlobals(ScriptBlockHeader::default()),
             globals,
         );
         assert!(block.unwrap().is_none(), "output should be None");
 
         let script = r#"test(5)"#;
-        let block = state.read_block(
-            &CustomBlockHeader {
-                t: CustomBlockType::InlineScript,
-                hidden_title: None,
-            },
-            script,
-        );
+        let block = state.read_block(&CustomBlockHeader::InlineScript, script);
         let line = if let OutputType::Inline(line) = block.unwrap().unwrap().output {
             line
         } else {
@@ -528,21 +543,12 @@ let x = 5;
 "#;
         let mut state = ScriptState::initial_state();
         let _ = state.read_block(
-            &CustomBlockHeader {
-                t: CustomBlockType::Script,
-                hidden_title: None,
-            },
+            &CustomBlockHeader::Script(ScriptBlockHeader::default()),
             script,
         );
 
         let script = r#"x + 1"#;
-        let block = state.read_block(
-            &CustomBlockHeader {
-                t: CustomBlockType::InlineScript,
-                hidden_title: None,
-            },
-            script,
-        );
+        let block = state.read_block(&CustomBlockHeader::InlineScript, script);
         let line = if let OutputType::Inline(line) = block.unwrap().unwrap().output {
             line
         } else {
@@ -561,10 +567,7 @@ row([7, 8, 9]);
 "#;
         let mut state = ScriptState::initial_state();
         let block = state.read_block(
-            &CustomBlockHeader {
-                t: CustomBlockType::DynamicTable,
-                hidden_title: None,
-            },
+            &CustomBlockHeader::DynamicTable(ScriptBlockHeader::default()),
             script,
         );
         let (head, rows) =
@@ -592,23 +595,11 @@ data:
 "#;
         let mut state = ScriptState::initial_state();
         state
-            .read_block(
-                &CustomBlockHeader {
-                    t: CustomBlockType::Data,
-                    hidden_title: None,
-                },
-                data,
-            )
+            .read_block(&CustomBlockHeader::Data(ScriptBlockHeader::default()), data)
             .unwrap();
 
         let script = r#"testdata[1]["fieldA"]"#;
-        let block = state.read_block(
-            &CustomBlockHeader {
-                t: CustomBlockType::InlineScript,
-                hidden_title: None,
-            },
-            script,
-        );
+        let block = state.read_block(&CustomBlockHeader::InlineScript, script);
         let line = if let OutputType::Inline(line) = block.unwrap().unwrap().output {
             line
         } else {
@@ -634,19 +625,19 @@ data:
 "#,
             ),
             (
-                r#"```{"t": "Script"}
+                r#"```{"t":"Script"}
 let x = 1 + 1;
 ```
 
 "#,
-                r#"```{"t": "Script"}
+                r#"```{"t":"Script"}
 let x = 1 + 1;
 ```
 
 "#,
             ),
             (
-                r#"```{"t": "Script"}
+                r#"```{"t":"Script"}
 let x = 1 + 1;
 // Existing "output comment" should be stripped
 debug(x);
@@ -654,7 +645,7 @@ debug(x);
 ```
 
 "#,
-                r#"```{"t": "Script"}
+                r#"```{"t":"Script"}
 let x = 1 + 1;
 // Existing "output comment" should be stripped
 debug(x);
@@ -664,14 +655,14 @@ debug(x);
 "#,
             ),
             (
-                r#"```{"t": "DynamicTable"}
+                r#"```{"t":"DynamicTable"}
 row([1,2,3,4]);
 row([1,2,3,4]);
 row([1,2,3,4]);
 ```
 
 "#,
-                r#"```{"t": "DynamicTable"}
+                r#"```{"t":"DynamicTable"}
 row([1,2,3,4]);
 row([1,2,3,4]);
 row([1,2,3,4]);
@@ -684,7 +675,7 @@ row([1,2,3,4]);
 "#,
             ),
             (
-                r#"```{"t": "DynamicTable"}
+                r#"```{"t":"DynamicTable"}
 row([1,2,3,4]);
 row([1,2,3,4]);
 row([1,2,3,4]);
@@ -695,7 +686,7 @@ row([1,2,3,4]);
 ```
 
 "#,
-                r#"```{"t": "DynamicTable"}
+                r#"```{"t":"DynamicTable"}
 row([1,2,3,4]);
 row([1,2,3,4]);
 row([1,2,3,4]);
@@ -708,7 +699,7 @@ row([1,2,3,4]);
 "#,
             ),
             (
-                r#"```{"t": "Data"}
+                r#"```{"t":"Data"}
 name: test
 data:
 - a: 1
@@ -721,7 +712,7 @@ data:
 ```
 
 "#,
-                r#"```{"t": "Data"}
+                r#"```{"t":"Data"}
 name: test
 data:
 - a: '1'
@@ -741,6 +732,18 @@ data:
 
 "#,
             ),
+            (
+                r#"```{"t":"Script","hidden_title":"abc"}
+let x = 1 + 1;
+```
+
+"#,
+                r#"```{"t":"Script","hidden_title":"abc"}
+let x = 1 + 1;
+```
+
+"#,
+            ),
         ];
         let format = crate::Format::Md;
         for (document, expected) in documents {
@@ -753,6 +756,17 @@ data:
             println!("Wanted:\n{}\nGot:\n{}", expected, output);
 
             assert_eq!(expected, output);
+
+            let events = crate::parse_markdown(&output)
+                .into_iter()
+                .map(|ee| format.transform_extended_event(ee))
+                .flatten();
+            let output = format.render(events);
+
+            assert_eq!(
+                expected, output,
+                "output rendered again should produce the same output"
+            );
         }
     }
 }

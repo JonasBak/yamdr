@@ -1,4 +1,4 @@
-use crate::{CustomBlock, CustomBlockHeader, CustomBlockState, CustomBlockType, Format};
+use crate::{CustomBlock, CustomBlockHeader, CustomBlockState, Format};
 use layout::backends::svg::SVGWriter;
 use layout::gv;
 use pulldown_cmark::{escape::escape_html, CodeBlockKind, Event, Tag};

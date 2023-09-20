@@ -2,10 +2,11 @@ mod graph_block;
 mod html;
 mod md;
 mod script_block;
+mod utils;
 
 use graph_block::{GraphBlock, GraphState};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
-use script_block::{ScriptBlock, ScriptState};
+use script_block::{ScriptBlock, ScriptBlockHeader, ScriptState};
 use serde::{Deserialize, Serialize};
 
 trait CustomBlockState: Sized {
@@ -125,22 +126,17 @@ pub struct YamdrOptions {
 
 pub struct Meta {}
 
-#[derive(Deserialize, Debug)]
-pub enum CustomBlockType {
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "t")]
+pub enum CustomBlockHeader {
     Graph,
-    Script,
-    ScriptGlobals,
-    Data,
-    DynamicTable,
+    Script(ScriptBlockHeader),
+    ScriptGlobals(ScriptBlockHeader),
+    Data(ScriptBlockHeader),
+    DynamicTable(ScriptBlockHeader),
     InlineScript,
     Svg,
     Test,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct CustomBlockHeader {
-    t: CustomBlockType,
-    hidden_title: Option<String>,
 }
 
 #[derive(Debug)]
@@ -201,21 +197,26 @@ fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
         {
             Vec::new()
         }
-        Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(prop)))
-            if prop.as_ref().starts_with("{") =>
+        Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(prop))) =>
         {
-            let Ok(block) = serde_json::from_str::<CustomBlockHeader>(prop) else {
-                current_custom_block = Some(Err(CustomBlockError{msg: "Could not parse block head".into()}));
-                return Vec::new();
-            };
-            current_custom_block = Some(Ok(block));
-            Vec::new()
+            match serde_yaml::from_str::<CustomBlockHeader>(prop) {
+                Ok(block) => {
+                    current_custom_block = Some(Ok(block));
+                    Vec::new()
+                }
+                Err(_) => {
+                    vec![ExtendedEvent::Standard(event)]
+                }
+            }
         }
-        Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(prop)))
-            if prop.as_ref().starts_with("{") =>
+        Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(prop))) =>
         {
-                current_custom_block = None;
-                Vec::new()
+                if current_custom_block.is_some() {
+                    current_custom_block = None;
+                    Vec::new()
+                } else {
+                    vec![ExtendedEvent::Standard(event)]
+                }
         }
         Event::Text(text) if current_custom_block.is_some() => {
             let block = match current_custom_block.as_ref().unwrap() {
@@ -228,8 +229,8 @@ fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
                     // return vec![ExtendedEvent::Custom(CustomEvent::CustomBlockError(err.msg.clone()))]
                 }
             };
-            match block.t {
-                CustomBlockType::Graph => {
+            match block {
+                CustomBlockHeader::Graph => {
                     match states.graph.read_block(block, text) {
                         Ok(Some(block)) => {
                             return vec![ExtendedEvent::Custom(CustomEvent::GraphBlock(block))];
@@ -241,10 +242,10 @@ fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
                         }
                     }
                 }
-                CustomBlockType::DynamicTable |
-                CustomBlockType::ScriptGlobals |
-                CustomBlockType::Script |
-                CustomBlockType::Data => {
+                CustomBlockHeader::DynamicTable(_) |
+                CustomBlockHeader::ScriptGlobals(_) |
+                CustomBlockHeader::Script(_) |
+                CustomBlockHeader::Data(_) => {
                     match states.script.read_block(block, text) {
                         Ok(Some(block)) => {
                             return vec![ExtendedEvent::Custom(CustomEvent::ScriptBlock(block))];
@@ -262,7 +263,7 @@ fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
         },
         Event::Code(code) if code.starts_with("_") && code.ends_with("_") && code.len() > 2 => {
             let code = &code[1..(code.len()-1)];
-            match states.script.read_block(&CustomBlockHeader{t: CustomBlockType::InlineScript, hidden_title: None}, code) {
+            match states.script.read_block(&CustomBlockHeader::InlineScript, code) {
                 Ok(Some(block)) => {
                     return vec![ExtendedEvent::Custom(CustomEvent::ScriptBlock(block))];
                 }
