@@ -1,8 +1,4 @@
-use pulldown_cmark::{
-    CodeBlockKind, Event, HeadingLevel, Tag,
-};
-
-
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Tag};
 
 fn start_tag(tag: &Tag, parent_tags: &Vec<Tag>, event_count: u64) -> String {
     match tag {
@@ -42,8 +38,10 @@ fn start_tag(tag: &Tag, parent_tags: &Vec<Tag>, event_count: u64) -> String {
 
 fn end_tag(tag: &Tag, parent_tags: &Vec<Tag>, _event_count: u64) -> String {
     match tag {
-        Tag::Heading(_, _, _) => "\n\n".into(),
-        Tag::CodeBlock(_) => "```\n\n".into(),
+        Tag::Heading(_, None, _) => "\n\n".into(),
+        Tag::Heading(_, Some(id), _) => format!(" {{ #{} }}\n\n", id),
+        Tag::CodeBlock(CodeBlockKind::Fenced(_)) => "```\n\n".into(),
+        Tag::CodeBlock(CodeBlockKind::Indented) => "\n".into(),
         Tag::Table(_) => "\n".into(),
         Tag::TableHead => {
             let Some(Tag::Table(table)) = parent_tags.last() else {
@@ -91,7 +89,17 @@ pub fn render<'a>(mut events: impl Iterator<Item = Event<'a>>) -> String {
                     end_tag(&tag, &tag_stack, event_count.last().copied().unwrap_or(0)).as_str();
             }
             Event::Text(text) => {
-                md_output += &text;
+                match (tag_stack.first(), tag_stack.last()) {
+                    (_, Some(Tag::CodeBlock(CodeBlockKind::Indented))) => {
+                        md_output += &format!("    {}", text);
+                    }
+                    (Some(Tag::BlockQuote), _) => {
+                        md_output += &format!("> {}", text);
+                    }
+                    _ => {
+                        md_output += &text;
+                    }
+                }
             }
             Event::Code(text) => {
                 md_output += "`";
@@ -202,6 +210,19 @@ code block with props
   - Item 6
 
 "#,
+            r#"    Indented code block
+    Line 2
+    Line 3
+
+"#,
+            r#"> Block quote
+> Line 2
+> Line 3
+
+"#,
+r#"# Header with id { #header-id }
+
+"#,
         ];
         let md_options = Options::all();
         for tag in tags {
@@ -237,6 +258,31 @@ New paragraph.
 3. c
 4. d
 5. e
+
+## Code blocks
+
+```
+Fenced
+
+code
+block
+
+```
+
+    Indented
+    code
+
+    block
+
+## Other stuff
+
+> Block quote
+> With two lines
+
+| A | table | a | b | c |
+|---|---|---|---|---|
+| 1 | 2 | 3 | 4 | 5 |
+| 6 | 7 | 8 | 9 | 10 |
 
 "#];
         let md_options = Options::all();

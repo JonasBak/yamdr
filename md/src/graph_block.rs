@@ -1,4 +1,4 @@
-use crate::{CustomBlock, CustomBlockHeader, CustomBlockState, Format};
+use crate::{CustomEvent, CustomBlock, CustomBlockHeader, CustomBlockState, Format};
 use layout::backends::svg::SVGWriter;
 use layout::gv;
 use pulldown_cmark::{escape::escape_html, CodeBlockKind, Event, Tag};
@@ -12,8 +12,6 @@ pub struct GraphBlock {
 pub struct GraphState {}
 
 impl CustomBlockState for GraphState {
-    type Block = GraphBlock;
-
     fn initial_state() -> Self {
         return GraphState {};
     }
@@ -22,7 +20,7 @@ impl CustomBlockState for GraphState {
         &mut self,
         header: &CustomBlockHeader,
         input: &str,
-    ) -> Result<Option<Self::Block>, String> {
+    ) -> Result<Option<CustomEvent>, String> {
         match gv::DotParser::new(input).process() {
             Ok(g) => {
                 let mut gb = gv::GraphBuilder::new();
@@ -31,10 +29,10 @@ impl CustomBlockState for GraphState {
                 let mut svg = SVGWriter::new();
                 graph.do_it(false, false, false, &mut svg);
                 let output = svg.finalize();
-                return Ok(Some(GraphBlock {
+                return Ok(Some(CustomEvent::GraphBlock(GraphBlock {
                     input: input.into(),
                     output,
-                }));
+                })));
             }
             Err(err) => {
                 let msg = format!("error parsing graph block: {}", err);

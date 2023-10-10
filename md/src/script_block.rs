@@ -1,5 +1,7 @@
 use crate::{
-    utils::html_hide_with_title, CustomBlock, CustomBlockHeader, CustomBlockState, Format,
+    plotters_block::PlottersBlock,
+    utils::{dynamic_as_f64, html_hide_with_title},
+    CustomBlock, CustomBlockHeader, CustomBlockState, CustomEvent, Format,
 };
 use pulldown_cmark::{escape::escape_html, CodeBlockKind, Event, Tag};
 use rhai::{plugin::Dynamic, Engine, Scope, AST};
@@ -31,6 +33,7 @@ enum OutputType {
     Table((String, Vec<String>, Vec<Vec<String>>)),
     Inline(String),
     Data(DataBlock),
+    Chart((String, Vec<Vec<(f32, f32)>>)),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -53,8 +56,6 @@ struct DataBlock {
 }
 
 impl CustomBlockState for ScriptState {
-    type Block = ScriptBlock;
-
     fn initial_state() -> Self {
         let engine = Engine::new();
         let scope = Scope::new();
@@ -72,15 +73,15 @@ impl CustomBlockState for ScriptState {
         &mut self,
         header: &CustomBlockHeader,
         input: &str,
-    ) -> Result<Option<Self::Block>, String> {
+    ) -> Result<Option<CustomEvent>, String> {
         match header {
             CustomBlockHeader::Script(header) => {
                 let output = self.runtime.run_block(input);
                 match output {
-                    Ok(output) => Ok(Some(Self::Block {
+                    Ok(output) => Ok(Some(CustomEvent::ScriptBlock(ScriptBlock {
                         output: OutputType::RunningScript(output),
                         header: header.clone(),
-                    })),
+                    }))),
                     Err(err) => Err(err),
                 }
             }
@@ -92,21 +93,28 @@ impl CustomBlockState for ScriptState {
                 }
             }
             CustomBlockHeader::DynamicTable(header) => match self.runtime.generate_table(input) {
-                Ok((head, rows)) => Ok(Some(Self::Block {
+                Ok((head, rows)) => Ok(Some(CustomEvent::ScriptBlock(ScriptBlock {
                     output: OutputType::Table((input.into(), head, rows)),
                     header: header.clone(),
-                })),
+                }))),
+                Err(err) => Err(err),
+            },
+            CustomBlockHeader::DynamicChart(header) => match self.runtime.generate_chart(input) {
+                Ok(data) => Ok(Some(CustomEvent::ScriptBlock(ScriptBlock {
+                    output: OutputType::Chart((input.into(), data)),
+                    header: header.clone(),
+                }))),
                 Err(err) => Err(err),
             },
             CustomBlockHeader::InlineScript => match self.runtime.eval_line(input) {
-                Ok(output) => Ok(Some(Self::Block {
+                Ok(output) => Ok(Some(CustomEvent::ScriptBlock(ScriptBlock {
                     output: OutputType::Inline(format!(
                         "{} // > {}",
                         input.split(" // >").next().unwrap_or(""),
                         output
                     )),
                     header: ScriptBlockHeader::default(),
-                })),
+                }))),
                 Err(err) => Err(err),
             },
             CustomBlockHeader::Data(header) => {
@@ -114,10 +122,10 @@ impl CustomBlockState for ScriptState {
                     .map_err(|err| format!("failed to parse block: {}", err.to_string()))?;
                 let output = self.runtime.add_constant(data.clone());
                 self.data.insert(data.name.clone(), data.clone());
-                Ok(Some(Self::Block {
+                Ok(Some(CustomEvent::ScriptBlock(ScriptBlock {
                     output: OutputType::Data(data),
                     header: header.clone(),
-                }))
+                })))
             }
             _ => {
                 return Err(format!(
@@ -287,6 +295,13 @@ impl CustomBlock for ScriptBlock {
             (Format::Md, OutputType::Inline(output)) => {
                 vec![Event::Code(format!(r#"_{}_"#, output).into())]
             }
+            (Format::Html, OutputType::Chart((_, data))) => PlottersBlock::LineChart {
+                title: "Todo".to_string(),
+                range_x: None,
+                range_y: None,
+                data: data.clone(),
+            }
+            .to_events(Format::Html),
             _ => todo!(),
         }
     }
@@ -409,6 +424,43 @@ impl Runtime {
         let rows = head.split_off(1);
         return Ok((head.pop().unwrap(), rows));
     }
+    fn generate_chart(&mut self, script: &str) -> Result<Vec<Vec<(f32, f32)>>, String> {
+        let mut engine = Engine::new();
+
+        let data = Arc::new(RwLock::new(Vec::<Vec<(f32, f32)>>::new()));
+
+        {
+            let data = data.clone();
+            engine.register_fn("plot", move |plot: Vec<Dynamic>| {
+                data.write().unwrap().push(
+                    plot.into_iter()
+                        .map(|d| d.into_typed_array::<Dynamic>().unwrap())
+                        .map(|v| {
+                            (
+                                dynamic_as_f64(&v[0]).unwrap_or(0.0) as f32,
+                                dynamic_as_f64(&v[1]).unwrap_or(0.0) as f32,
+                            )
+                        })
+                        .collect(),
+                );
+            });
+        }
+
+        let mut ast = engine
+            .compile(script)
+            .map_err(|err| format!("compilation error: {err:?}"))?;
+
+        if let Some(globals) = self.globals.as_ref() {
+            ast = globals.merge(&ast);
+        }
+
+        engine
+            .run_ast_with_scope(&mut self.scope, &ast)
+            .map_err(|err| format!("runtime error: {err:?}"))?;
+
+        let data = data.read().unwrap().clone();
+        return Ok(data);
+    }
     fn add_constant(&mut self, data: DataBlock) {
         let values: Vec<rhai::Dynamic> = data.data.into_iter().map(|v| v.into()).collect();
         self.scope
@@ -482,7 +534,12 @@ debug(x + 1);
             &CustomBlockHeader::Script(ScriptBlockHeader::default()),
             script,
         );
-        let lines = if let OutputType::RunningScript(lines) = block.unwrap().unwrap().output {
+        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
+            block
+        } else {
+            panic!("output should be CustomEvent::ScriptBlock");
+        };
+        let lines = if let OutputType::RunningScript(lines) = block.output {
             lines
         } else {
             panic!("output type should be OutputType::RunningScript");
@@ -504,7 +561,12 @@ debug(x + 1);
         let script = r#"4 + 5"#;
         let mut state = ScriptState::initial_state();
         let block = state.read_block(&CustomBlockHeader::InlineScript, script);
-        let line = if let OutputType::Inline(line) = block.unwrap().unwrap().output {
+        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
+            block
+        } else {
+            panic!("output should be CustomEvent::ScriptBlock");
+        };
+        let line = if let OutputType::Inline(line) = block.output {
             line
         } else {
             panic!("output type should be OutputType::Inline");
@@ -528,7 +590,12 @@ fn test(n) {
 
         let script = r#"test(5)"#;
         let block = state.read_block(&CustomBlockHeader::InlineScript, script);
-        let line = if let OutputType::Inline(line) = block.unwrap().unwrap().output {
+        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
+            block
+        } else {
+            panic!("output should be CustomEvent::ScriptBlock");
+        };
+        let line = if let OutputType::Inline(line) = block.output {
             line
         } else {
             panic!("output type should be OutputType::Inline");
@@ -549,7 +616,12 @@ let x = 5;
 
         let script = r#"x + 1"#;
         let block = state.read_block(&CustomBlockHeader::InlineScript, script);
-        let line = if let OutputType::Inline(line) = block.unwrap().unwrap().output {
+        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
+            block
+        } else {
+            panic!("output should be CustomEvent::ScriptBlock");
+        };
+        let line = if let OutputType::Inline(line) = block.output {
             line
         } else {
             panic!("output type should be OutputType::Inline");
@@ -570,12 +642,16 @@ row([7, 8, 9]);
             &CustomBlockHeader::DynamicTable(ScriptBlockHeader::default()),
             script,
         );
-        let (head, rows) =
-            if let OutputType::Table((_, head, rows)) = block.unwrap().unwrap().output {
-                (head, rows)
-            } else {
-                panic!("output type should be OutputType::Table");
-            };
+        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
+            block
+        } else {
+            panic!("output should be CustomEvent::ScriptBlock");
+        };
+        let (head, rows) = if let OutputType::Table((_, head, rows)) = block.output {
+            (head, rows)
+        } else {
+            panic!("output type should be OutputType::Table");
+        };
         assert_eq!(head, &["head A", "head B", "head C"]);
         assert_eq!(rows.len(), 3, "there should be 3 rows");
         assert_eq!(rows[0], &["1", "2", "3"]);
@@ -600,12 +676,43 @@ data:
 
         let script = r#"testdata[1]["fieldA"]"#;
         let block = state.read_block(&CustomBlockHeader::InlineScript, script);
-        let line = if let OutputType::Inline(line) = block.unwrap().unwrap().output {
+        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
+            block
+        } else {
+            panic!("output should be CustomEvent::ScriptBlock");
+        };
+        let line = if let OutputType::Inline(line) = block.output {
             line
         } else {
             panic!("output type should be OutputType::Inline");
         };
         assert_eq!(line, r#"testdata[1]["fieldA"] // > 3"#);
+    }
+
+    #[test]
+    fn block_type_dynamic_chart() {
+        let script = r#"
+plot([[0, 0], [2, 1], [4, 2]]);
+plot([[4, 2], [2, 3], [0, 4]]);
+"#;
+        let mut state = ScriptState::initial_state();
+        let block = state.read_block(
+            &CustomBlockHeader::DynamicChart(ScriptBlockHeader::default()),
+            script,
+        );
+        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
+            block
+        } else {
+            panic!("output should be CustomEvent::ScriptBlock");
+        };
+        let data = if let OutputType::Chart((_, data)) = block.output {
+            data
+        } else {
+            panic!("output type should be OutputType::Chart");
+        };
+        assert_eq!(data.len(), 2, "there should be 2 sets of data");
+        assert_eq!(data[0], &[(0.0, 0.0), (2.0, 1.0), (4.0, 2.0)]);
+        assert_eq!(data[1], &[(4.0, 2.0), (2.0, 3.0), (0.0, 4.0)]);
     }
 
     #[test]

@@ -6,7 +6,8 @@ pub fn markdown_to_html(markdown: &str) -> String {
         standalone: None,
         additional_head: None,
         additional_body: None,
+        format: Some(md::Format::Html),
     };
-    let (_meta, html) = md::markdown_to_html(&options, markdown);
+    let (_meta, html) = md::render_markdown(&options, markdown);
     return html;
 }
