@@ -1,7 +1,7 @@
 use crate::{
     plotters_block::PlottersBlock,
     utils::{dynamic_as_f64, html_hide_with_title},
-    CustomBlock, CustomBlockHeader, CustomBlockState, CustomEvent, Format,
+    CustomBlock, CustomBlockHeader, CustomBlockReader, Error, Format, Result,
 };
 use pulldown_cmark::{escape::escape_html, CodeBlockKind, Event, Tag};
 use rhai::{plugin::Dynamic, Engine, Scope, AST};
@@ -13,18 +13,12 @@ use std::sync::RwLock;
 #[derive(Debug, Clone)]
 pub struct ScriptBlock {
     output: OutputType,
-    header: ScriptBlockHeader,
+    header: CustomBlockHeader,
 }
 
-pub struct ScriptState {
+pub struct ScriptBlockReader {
     runtime: Runtime,
     data: BTreeMap<String, DataBlock>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ScriptBlockHeader {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hidden_title: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,84 +49,96 @@ struct DataBlock {
     data: Vec<BTreeMap<String, String>>,
 }
 
-impl CustomBlockState for ScriptState {
-    fn initial_state() -> Self {
+impl ScriptBlockReader {
+    pub fn initial_state() -> Self {
         let engine = Engine::new();
         let scope = Scope::new();
-        return ScriptState {
+        ScriptBlockReader {
             runtime: Runtime {
                 engine,
                 scope,
                 globals: None,
             },
             data: BTreeMap::new(),
-        };
+        }
+    }
+}
+
+impl CustomBlockReader for ScriptBlockReader {
+    fn can_read_block(&self, header: &CustomBlockHeader) -> bool {
+        matches!(
+            header.t.as_str(),
+            "DynamicTable" | "DynamicChart" | "ScriptGlobals" | "Script" | "Data"
+        )
     }
 
     fn read_block(
         &mut self,
         header: &CustomBlockHeader,
         input: &str,
-    ) -> Result<Option<CustomEvent>, String> {
-        match header {
-            CustomBlockHeader::Script(header) => {
+    ) -> Result<Option<Box<dyn CustomBlock>>> {
+        match header.t.as_str() {
+            "Script" => {
                 let output = self.runtime.run_block(input);
                 match output {
-                    Ok(output) => Ok(Some(CustomEvent::ScriptBlock(ScriptBlock {
+                    Ok(output) => Ok(Some(Box::new(ScriptBlock {
                         output: OutputType::RunningScript(output),
                         header: header.clone(),
                     }))),
-                    Err(err) => Err(err),
+                    Err(err) => Err(Error::CustomBlockRead(err)),
                 }
             }
-            CustomBlockHeader::ScriptGlobals(_) => {
+            "ScriptGlobals" => {
                 let output = self.runtime.add_globals(input);
                 match output {
-                    Ok(_) => return Ok(None),
-                    Err(err) => return Err(err),
+                    Ok(_) => Ok(None),
+                    Err(err) => Err(Error::CustomBlockRead(err)),
                 }
             }
-            CustomBlockHeader::DynamicTable(header) => match self.runtime.generate_table(input) {
-                Ok((head, rows)) => Ok(Some(CustomEvent::ScriptBlock(ScriptBlock {
+            "DynamicTable" => match self.runtime.generate_table(input) {
+                Ok((head, rows)) => Ok(Some(Box::new(ScriptBlock {
                     output: OutputType::Table((input.into(), head, rows)),
                     header: header.clone(),
                 }))),
-                Err(err) => Err(err),
+                Err(err) => Err(Error::CustomBlockRead(err)),
             },
-            CustomBlockHeader::DynamicChart(header) => match self.runtime.generate_chart(input) {
-                Ok(data) => Ok(Some(CustomEvent::ScriptBlock(ScriptBlock {
+            "DynamicChart" => match self.runtime.generate_chart(input) {
+                Ok(data) => Ok(Some(Box::new(ScriptBlock {
                     output: OutputType::Chart((input.into(), data)),
                     header: header.clone(),
                 }))),
-                Err(err) => Err(err),
+                Err(err) => Err(Error::CustomBlockRead(err)),
             },
-            CustomBlockHeader::InlineScript => match self.runtime.eval_line(input) {
-                Ok(output) => Ok(Some(CustomEvent::ScriptBlock(ScriptBlock {
-                    output: OutputType::Inline(format!(
-                        "{} // > {}",
-                        input.split(" // >").next().unwrap_or(""),
-                        output
-                    )),
-                    header: ScriptBlockHeader::default(),
-                }))),
-                Err(err) => Err(err),
-            },
-            CustomBlockHeader::Data(header) => {
-                let data: DataBlock = serde_yaml::from_str(input)
-                    .map_err(|err| format!("failed to parse block: {}", err.to_string()))?;
-                let output = self.runtime.add_constant(data.clone());
+            "Data" => {
+                let data: DataBlock = serde_yaml::from_str(input).map_err(|err| {
+                    Error::CustomBlockRead(format!("failed to parse block: {}", err))
+                })?;
+                self.runtime.add_constant(data.clone());
                 self.data.insert(data.name.clone(), data.clone());
-                Ok(Some(CustomEvent::ScriptBlock(ScriptBlock {
+                Ok(Some(Box::new(ScriptBlock {
                     output: OutputType::Data(data),
                     header: header.clone(),
                 })))
             }
-            _ => {
-                return Err(format!(
-                    "Unsupported block type for ScriptBlock: {:?}",
-                    header
-                ))
-            }
+            _ => Err(Error::UnsupportedBlockType(header.t.clone())),
+        }
+    }
+
+    fn can_read_inline(&self, inline: &str) -> bool {
+        inline.len() > 3 && inline.starts_with('_') && inline.ends_with('_')
+    }
+    fn read_inline(&mut self, inline: &str) -> Result<Option<Box<dyn CustomBlock>>> {
+        let input = &inline[1..(inline.len() - 1)];
+        match self.runtime.eval_line(input) {
+            Ok(output) => Ok(Some(Box::new(ScriptBlock {
+                output: OutputType::Inline(format!(
+                    "{} // > {}",
+                    input.split(" // >").next().unwrap_or(""),
+                    output
+                )),
+                header: CustomBlockHeader::empty("".into()),
+            }))),
+            Err(err) => Err(Error::CustomBlockRead(err)),
         }
     }
 }
@@ -152,7 +158,7 @@ impl CustomBlock for ScriptBlock {
                     let escaped = match line {
                         LineType::Code(line) => {
                             let mut line_escaped = String::new();
-                            escape_html(&mut line_escaped, &line).unwrap();
+                            escape_html(&mut line_escaped, line).unwrap();
                             format!(r#"<span class="script-code">{}</span>"#, line_escaped) + "\n"
                         }
                         LineType::Output(line) => {
@@ -165,7 +171,12 @@ impl CustomBlock for ScriptBlock {
                 }
                 events.push(Event::Html(r#"</pre></div>"#.into()));
 
-                if let Some(title) = self.header.hidden_title.as_ref() {
+                if let Some(title) = self
+                    .header
+                    .fields
+                    .get("hidden_title")
+                    .and_then(serde_yaml::Value::as_str)
+                {
                     html_hide_with_title(title.to_string(), events)
                 } else {
                     events
@@ -173,9 +184,7 @@ impl CustomBlock for ScriptBlock {
             }
             (Format::Md, OutputType::RunningScript(lines)) => {
                 let props: pulldown_cmark::CowStr =
-                    serde_json::to_string(&CustomBlockHeader::Script(self.header.clone()))
-                        .unwrap()
-                        .into();
+                    serde_json::to_string(&self.header).unwrap().into();
                 let mut events = vec![Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(
                     props.clone(),
                 )))];
@@ -210,17 +219,14 @@ impl CustomBlock for ScriptBlock {
                         code += "\n";
                         code += &table_output
                             .lines()
-                            .filter(|line| line.len() > 0)
+                            .filter(|line| !line.is_empty())
                             .map(|line| format!("// > {}", line))
                             .collect::<Vec<String>>()
                             .join("\n");
                         code += "\n";
 
-                        let props: pulldown_cmark::CowStr = serde_json::to_string(
-                            &CustomBlockHeader::DynamicTable(self.header.clone()),
-                        )
-                        .unwrap()
-                        .into();
+                        let props: pulldown_cmark::CowStr =
+                            serde_json::to_string(&self.header).unwrap().into();
                         vec![
                             Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(props.clone()))),
                             Event::Text(code.into()),
@@ -238,7 +244,7 @@ impl CustomBlock for ScriptBlock {
                 }
                 let mut head = vec!["#".to_string()];
                 head.extend(fields.keys().cloned());
-                let rows = data
+                let rows: Vec<_> = data
                     .data
                     .iter()
                     .enumerate()
@@ -255,7 +261,12 @@ impl CustomBlock for ScriptBlock {
                 let events = build_table(&head, &rows);
                 match format {
                     Format::Html => {
-                        if let Some(title) = self.header.hidden_title.as_ref() {
+                        if let Some(title) = self
+                            .header
+                            .fields
+                            .get("hidden_title")
+                            .and_then(serde_yaml::Value::as_str)
+                        {
                             html_hide_with_title(title.to_string(), events)
                         } else {
                             events
@@ -267,16 +278,14 @@ impl CustomBlock for ScriptBlock {
                         output += "\n";
                         output += &table_output
                             .lines()
-                            .filter(|line| line.len() > 0)
+                            .filter(|line| !line.is_empty())
                             .map(|line| format!("# {}", line))
                             .collect::<Vec<String>>()
                             .join("\n");
                         output += "\n";
 
                         let props: pulldown_cmark::CowStr =
-                            serde_json::to_string(&CustomBlockHeader::Data(self.header.clone()))
-                                .unwrap()
-                                .into();
+                            serde_json::to_string(&self.header).unwrap().into();
                         vec![
                             Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(props.clone()))),
                             Event::Text(output.into()),
@@ -305,25 +314,21 @@ impl CustomBlock for ScriptBlock {
             _ => todo!(),
         }
     }
+
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl Runtime {
-    fn new() -> Self {
-        let engine = Engine::new();
-        let scope = Scope::new();
-        return Runtime {
-            engine,
-            scope,
-            globals: None,
-        };
-    }
     fn add_globals(&mut self, script: &str) -> Result<(), String> {
         let ast = self
             .engine
             .compile(script)
             .map_err(|err| format!("compilation error: {err:?}"))?;
         self.globals = Some(ast.clone_functions_only());
-        return Ok(());
+        Ok(())
     }
     fn run_block(&mut self, script: &str) -> Result<Vec<LineType>, String> {
         let logbook = Arc::new(RwLock::new(Vec::<(usize, String)>::new()));
@@ -364,7 +369,7 @@ impl Runtime {
                 LineType::Code(line) => !line.starts_with("// > "),
             })
             .collect();
-        return Ok(lines);
+        Ok(lines)
     }
     fn eval_line(&mut self, script: &str) -> Result<String, String> {
         let mut ast = self
@@ -381,7 +386,7 @@ impl Runtime {
             .eval_ast_with_scope::<Dynamic>(&mut self.scope, &ast)
             .map_err(|err| format!("runtime error: {err:?}"))?;
 
-        return Ok(value.to_string());
+        Ok(value.to_string())
     }
     fn generate_table(&mut self, script: &str) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
         let mut engine = Engine::new();
@@ -392,7 +397,7 @@ impl Runtime {
             let lines = lines.clone();
             engine.register_raw_fn(
                 "row",
-                &[rhai::plugin::TypeId::of::<Vec<Dynamic>>()],
+                [rhai::plugin::TypeId::of::<Vec<Dynamic>>()],
                 move |_, args| {
                     lines.write().unwrap().push(
                         args[0]
@@ -422,7 +427,7 @@ impl Runtime {
 
         let mut head = lines.read().unwrap().clone();
         let rows = head.split_off(1);
-        return Ok((head.pop().unwrap(), rows));
+        Ok((head.pop().unwrap(), rows))
     }
     fn generate_chart(&mut self, script: &str) -> Result<Vec<Vec<(f32, f32)>>, String> {
         let mut engine = Engine::new();
@@ -459,7 +464,7 @@ impl Runtime {
             .map_err(|err| format!("runtime error: {err:?}"))?;
 
         let data = data.read().unwrap().clone();
-        return Ok(data);
+        Ok(data)
     }
     fn add_constant(&mut self, data: DataBlock) {
         let values: Vec<rhai::Dynamic> = data.data.into_iter().map(|v| v.into()).collect();
@@ -468,7 +473,7 @@ impl Runtime {
     }
 }
 
-fn build_table(head: &Vec<String>, rows: &Vec<Vec<String>>) -> Vec<Event<'static>> {
+fn build_table(head: &[String], rows: &[Vec<String>]) -> Vec<Event<'static>> {
     let mut events = Vec::new();
     events.push(Event::Start(Tag::Table(
         head.iter()
@@ -476,39 +481,27 @@ fn build_table(head: &Vec<String>, rows: &Vec<Vec<String>>) -> Vec<Event<'static
             .collect(),
     )));
     events.push(Event::Start(Tag::TableHead));
-    events.extend(
-        head.iter()
-            .map(|cell| {
-                vec![
-                    Event::Start(Tag::TableCell),
-                    Event::Text(cell.clone().into()),
-                    Event::End(Tag::TableCell),
-                ]
-            })
-            .flatten(),
-    );
+    events.extend(head.iter().flat_map(|cell| {
+        vec![
+            Event::Start(Tag::TableCell),
+            Event::Text(cell.clone().into()),
+            Event::End(Tag::TableCell),
+        ]
+    }));
     events.push(Event::End(Tag::TableHead));
-    events.extend(
-        rows.into_iter()
-            .map(|row| {
-                let mut events = Vec::new();
-                events.push(Event::Start(Tag::TableRow));
-                events.extend(
-                    row.iter()
-                        .map(|cell| {
-                            vec![
-                                Event::Start(Tag::TableCell),
-                                Event::Text(cell.clone().into()),
-                                Event::End(Tag::TableCell),
-                            ]
-                        })
-                        .flatten(),
-                );
-                events.push(Event::End(Tag::TableRow));
-                return events;
-            })
-            .flatten(),
-    );
+    events.extend(rows.iter().flat_map(|row| {
+        let mut events = Vec::new();
+        events.push(Event::Start(Tag::TableRow));
+        events.extend(row.iter().flat_map(|cell| {
+            vec![
+                Event::Start(Tag::TableCell),
+                Event::Text(cell.clone().into()),
+                Event::End(Tag::TableCell),
+            ]
+        }));
+        events.push(Event::End(Tag::TableRow));
+        events
+    }));
     events.push(Event::End(Tag::Table(
         head.iter()
             .map(|_| pulldown_cmark::Alignment::None)
@@ -520,7 +513,7 @@ fn build_table(head: &Vec<String>, rows: &Vec<Vec<String>>) -> Vec<Event<'static
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
+    use crate::utils::custom_block_downcast;
 
     #[test]
     fn block_type_script() {
@@ -529,16 +522,10 @@ let x = 4 + 5; // comment b
 debug(x);
 debug(x + 1);
 "#;
-        let mut state = ScriptState::initial_state();
-        let block = state.read_block(
-            &CustomBlockHeader::Script(ScriptBlockHeader::default()),
-            script,
-        );
-        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
-            block
-        } else {
-            panic!("output should be CustomEvent::ScriptBlock");
-        };
+        let mut state = ScriptBlockReader::initial_state();
+        let block = state.read_block(&CustomBlockHeader::empty("Script".into()), script);
+        let block: ScriptBlock = custom_block_downcast(block.unwrap().unwrap())
+            .expect("block should be type ScriptBlock");
         let lines = if let OutputType::RunningScript(lines) = block.output {
             lines
         } else {
@@ -558,14 +545,11 @@ debug(x + 1);
 
     #[test]
     fn block_type_inline_script() {
-        let script = r#"4 + 5"#;
-        let mut state = ScriptState::initial_state();
-        let block = state.read_block(&CustomBlockHeader::InlineScript, script);
-        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
-            block
-        } else {
-            panic!("output should be CustomEvent::ScriptBlock");
-        };
+        let script = r#"_4 + 5_"#;
+        let mut state = ScriptBlockReader::initial_state();
+        let block = state.read_inline(script);
+        let block: ScriptBlock = custom_block_downcast(block.unwrap().unwrap())
+            .expect("block should be type ScriptBlock");
         let line = if let OutputType::Inline(line) = block.output {
             line
         } else {
@@ -581,20 +565,14 @@ fn test(n) {
     n + 1
 }
 "#;
-        let mut state = ScriptState::initial_state();
-        let block = state.read_block(
-            &CustomBlockHeader::ScriptGlobals(ScriptBlockHeader::default()),
-            globals,
-        );
+        let mut state = ScriptBlockReader::initial_state();
+        let block = state.read_block(&CustomBlockHeader::empty("ScriptGlobals".into()), globals);
         assert!(block.unwrap().is_none(), "output should be None");
 
-        let script = r#"test(5)"#;
-        let block = state.read_block(&CustomBlockHeader::InlineScript, script);
-        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
-            block
-        } else {
-            panic!("output should be CustomEvent::ScriptBlock");
-        };
+        let script = r#"_test(5)_"#;
+        let block = state.read_inline(script);
+        let block: ScriptBlock = custom_block_downcast(block.unwrap().unwrap())
+            .expect("block should be type ScriptBlock");
         let line = if let OutputType::Inline(line) = block.output {
             line
         } else {
@@ -608,19 +586,13 @@ fn test(n) {
         let script = r#"
 let x = 5;
 "#;
-        let mut state = ScriptState::initial_state();
-        let _ = state.read_block(
-            &CustomBlockHeader::Script(ScriptBlockHeader::default()),
-            script,
-        );
+        let mut state = ScriptBlockReader::initial_state();
+        let _ = state.read_block(&CustomBlockHeader::empty("Script".into()), script);
 
-        let script = r#"x + 1"#;
-        let block = state.read_block(&CustomBlockHeader::InlineScript, script);
-        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
-            block
-        } else {
-            panic!("output should be CustomEvent::ScriptBlock");
-        };
+        let script = r#"_x + 1_"#;
+        let block = state.read_inline(script);
+        let block: ScriptBlock = custom_block_downcast(block.unwrap().unwrap())
+            .expect("block should be type ScriptBlock");
         let line = if let OutputType::Inline(line) = block.output {
             line
         } else {
@@ -637,16 +609,10 @@ row([1, 2, 3]);
 row([4, 5, 6]);
 row([7, 8, 9]);
 "#;
-        let mut state = ScriptState::initial_state();
-        let block = state.read_block(
-            &CustomBlockHeader::DynamicTable(ScriptBlockHeader::default()),
-            script,
-        );
-        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
-            block
-        } else {
-            panic!("output should be CustomEvent::ScriptBlock");
-        };
+        let mut state = ScriptBlockReader::initial_state();
+        let block = state.read_block(&CustomBlockHeader::empty("DynamicTable".into()), script);
+        let block: ScriptBlock =
+            custom_block_downcast(block.unwrap().unwrap()).expect("block should be ScriptBlock");
         let (head, rows) = if let OutputType::Table((_, head, rows)) = block.output {
             (head, rows)
         } else {
@@ -669,18 +635,15 @@ data:
 - fieldA: 3
   fieldB: 4
 "#;
-        let mut state = ScriptState::initial_state();
+        let mut state = ScriptBlockReader::initial_state();
         state
-            .read_block(&CustomBlockHeader::Data(ScriptBlockHeader::default()), data)
+            .read_block(&CustomBlockHeader::empty("Data".into()), data)
             .unwrap();
 
-        let script = r#"testdata[1]["fieldA"]"#;
-        let block = state.read_block(&CustomBlockHeader::InlineScript, script);
-        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
-            block
-        } else {
-            panic!("output should be CustomEvent::ScriptBlock");
-        };
+        let script = r#"_testdata[1]["fieldA"]_"#;
+        let block = state.read_inline(script);
+        let block: ScriptBlock =
+            custom_block_downcast(block.unwrap().unwrap()).expect("block should be ScriptBlock");
         let line = if let OutputType::Inline(line) = block.output {
             line
         } else {
@@ -695,16 +658,10 @@ data:
 plot([[0, 0], [2, 1], [4, 2]]);
 plot([[4, 2], [2, 3], [0, 4]]);
 "#;
-        let mut state = ScriptState::initial_state();
-        let block = state.read_block(
-            &CustomBlockHeader::DynamicChart(ScriptBlockHeader::default()),
-            script,
-        );
-        let block = if let CustomEvent::ScriptBlock(block) = block.unwrap().unwrap() {
-            block
-        } else {
-            panic!("output should be CustomEvent::ScriptBlock");
-        };
+        let mut state = ScriptBlockReader::initial_state();
+        let block = state.read_block(&CustomBlockHeader::empty("DynamicChart".into()), script);
+        let block: ScriptBlock =
+            custom_block_downcast(block.unwrap().unwrap()).expect("block should be ScriptBlock");
         let data = if let OutputType::Chart((_, data)) = block.output {
             data
         } else {
@@ -854,20 +811,20 @@ let x = 1 + 1;
         ];
         let format = crate::Format::Md;
         for (document, expected) in documents {
-            let events = crate::parse_markdown(document)
-                .into_iter()
-                .map(|ee| format.transform_extended_event(ee))
-                .flatten();
+            let parsed_markdown = crate::parse_markdown(document);
+            let events = parsed_markdown
+                .iter()
+                .flat_map(|ee| format.transform_extended_event(ee));
             let output = format.render(events);
 
             println!("Wanted:\n{}\nGot:\n{}", expected, output);
 
             assert_eq!(expected, output);
 
-            let events = crate::parse_markdown(&output)
-                .into_iter()
-                .map(|ee| format.transform_extended_event(ee))
-                .flatten();
+            let parsed_markdown = crate::parse_markdown(document);
+            let events = parsed_markdown
+                .iter()
+                .flat_map(|ee| format.transform_extended_event(ee));
             let output = format.render(events);
 
             assert_eq!(

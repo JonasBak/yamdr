@@ -1,7 +1,7 @@
-use crate::{CustomEvent, CustomBlock, CustomBlockHeader, CustomBlockState, Format};
+use crate::{CustomBlock, CustomBlockHeader, CustomBlockReader, Error, Format, Result};
 use layout::backends::svg::SVGWriter;
 use layout::gv;
-use pulldown_cmark::{escape::escape_html, CodeBlockKind, Event, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, Tag};
 
 #[derive(Debug, Clone)]
 pub struct GraphBlock {
@@ -9,18 +9,24 @@ pub struct GraphBlock {
     output: String,
 }
 
-pub struct GraphState {}
+pub struct GraphBlockReader {}
 
-impl CustomBlockState for GraphState {
-    fn initial_state() -> Self {
-        return GraphState {};
+impl GraphBlockReader {
+    pub fn initial_state() -> Self {
+        GraphBlockReader {}
+    }
+}
+
+impl CustomBlockReader for GraphBlockReader {
+    fn can_read_block(&self, header: &CustomBlockHeader) -> bool {
+        header.t == "Graph"
     }
 
     fn read_block(
         &mut self,
-        header: &CustomBlockHeader,
+        _header: &CustomBlockHeader,
         input: &str,
-    ) -> Result<Option<CustomEvent>, String> {
+    ) -> Result<Option<Box<dyn CustomBlock>>> {
         match gv::DotParser::new(input).process() {
             Ok(g) => {
                 let mut gb = gv::GraphBuilder::new();
@@ -29,15 +35,12 @@ impl CustomBlockState for GraphState {
                 let mut svg = SVGWriter::new();
                 graph.do_it(false, false, false, &mut svg);
                 let output = svg.finalize();
-                return Ok(Some(CustomEvent::GraphBlock(GraphBlock {
+                Ok(Some(Box::new(GraphBlock {
                     input: input.into(),
                     output,
-                })));
+                })))
             }
-            Err(err) => {
-                let msg = format!("error parsing graph block: {}", err);
-                return Err(msg);
-            }
+            Err(err) => Err(Error::CustomBlockRead(err)),
         }
     }
 }
@@ -62,9 +65,6 @@ impl CustomBlock for GraphBlock {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
-
     #[test]
     fn render_markdown() {
         let documents = [(
@@ -111,10 +111,10 @@ digraph D {
         )];
         let format = crate::Format::Md;
         for (document, expected) in documents {
-            let events = crate::parse_markdown(document)
-                .into_iter()
-                .map(|ee| format.transform_extended_event(ee))
-                .flatten();
+            let parsed_markdown = crate::parse_markdown(document);
+            let events = parsed_markdown
+                .iter()
+                .flat_map(|ee| format.transform_extended_event(ee));
             let output = format.render(events);
 
             assert_eq!(expected, output);

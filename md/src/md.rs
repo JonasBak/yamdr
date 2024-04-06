@@ -1,6 +1,6 @@
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Tag};
 
-fn start_tag(tag: &Tag, parent_tags: &Vec<Tag>, event_count: u64) -> String {
+fn start_tag(tag: &Tag, parent_tags: &[Tag], event_count: u64) -> String {
     match tag {
         Tag::Heading(HeadingLevel::H1, _, _) => "# ".into(),
         Tag::Heading(HeadingLevel::H2, _, _) => "## ".into(),
@@ -36,7 +36,7 @@ fn start_tag(tag: &Tag, parent_tags: &Vec<Tag>, event_count: u64) -> String {
     }
 }
 
-fn end_tag(tag: &Tag, parent_tags: &Vec<Tag>, _event_count: u64) -> String {
+fn end_tag(tag: &Tag, parent_tags: &[Tag], _event_count: u64) -> String {
     match tag {
         Tag::Heading(_, None, _) => "\n\n".into(),
         Tag::Heading(_, Some(id), _) => format!(" {{ #{} }}\n\n", id),
@@ -67,14 +67,16 @@ fn end_tag(tag: &Tag, parent_tags: &Vec<Tag>, _event_count: u64) -> String {
     }
 }
 
-pub fn render<'a>(mut events: impl Iterator<Item = Event<'a>>) -> String {
+pub fn render<'a>(events: impl Iterator<Item = Event<'a>>) -> String {
     let mut md_output = String::new();
 
     let mut tag_stack = Vec::new();
     let mut event_count = Vec::new();
 
-    while let Some(event) = events.next() {
-        event_count.last_mut().map(|n| *n += 1);
+    for event in events {
+        if let Some(n) = event_count.last_mut() {
+            *n += 1;
+        }
         match event {
             Event::Start(tag) => {
                 md_output +=
@@ -88,19 +90,17 @@ pub fn render<'a>(mut events: impl Iterator<Item = Event<'a>>) -> String {
                 md_output +=
                     end_tag(&tag, &tag_stack, event_count.last().copied().unwrap_or(0)).as_str();
             }
-            Event::Text(text) => {
-                match (tag_stack.first(), tag_stack.last()) {
-                    (_, Some(Tag::CodeBlock(CodeBlockKind::Indented))) => {
-                        md_output += &format!("    {}", text);
-                    }
-                    (Some(Tag::BlockQuote), _) => {
-                        md_output += &format!("> {}", text);
-                    }
-                    _ => {
-                        md_output += &text;
-                    }
+            Event::Text(text) => match (tag_stack.first(), tag_stack.last()) {
+                (_, Some(Tag::CodeBlock(CodeBlockKind::Indented))) => {
+                    md_output += &format!("    {}", text);
                 }
-            }
+                (Some(Tag::BlockQuote), _) => {
+                    md_output += &format!("> {}", text);
+                }
+                _ => {
+                    md_output += &text;
+                }
+            },
             Event::Code(text) => {
                 md_output += "`";
                 md_output += &text;
@@ -128,7 +128,7 @@ pub fn render<'a>(mut events: impl Iterator<Item = Event<'a>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
+    use pulldown_cmark::{Options, Parser};
 
     #[test]
     fn simple_tags() {
@@ -220,7 +220,7 @@ code block with props
 > Line 3
 
 "#,
-r#"# Header with id { #header-id }
+            r#"# Header with id { #header-id }
 
 "#,
         ];

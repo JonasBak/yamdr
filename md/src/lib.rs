@@ -1,3 +1,5 @@
+mod code_block;
+mod errors;
 mod graph_block;
 mod html;
 mod md;
@@ -5,50 +7,82 @@ mod plotters_block;
 mod script_block;
 mod utils;
 
-use graph_block::{GraphBlock, GraphState};
-use plotters_block::{PlottersBlock, PlottersState};
+use code_block::CodeBlockReader;
+pub use errors::*;
+use graph_block::GraphBlockReader;
+use plotters_block::PlottersBlockReader;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
-use script_block::{ScriptBlock, ScriptBlockHeader, ScriptState};
+use script_block::ScriptBlockReader;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-trait CustomBlockState: Sized {
-    fn initial_state() -> Self;
+/// Trait that represents a reader/processor for one or more types
+/// of custom blocks. Multiple readers may be able to process the same
+/// type of custom block, in that case the first registered reader will
+/// be chosen.
+pub trait CustomBlockReader {
+    /// Inspect a block header and return whether or not this reader should
+    /// be the one to process this block. It it returns `true`, it indicated
+    /// that you should be able to call `read_block` for that block.
+    fn can_read_block(&self, _header: &CustomBlockHeader) -> bool {
+        false
+    }
 
+    /// Process a block and return a CustomBlock.
+    ///
+    /// TODO: Option should be removed to always support "rerendering".
+    /// The None case should be handled in to_events
     fn read_block(
         &mut self,
-        header: &CustomBlockHeader,
-        input: &str,
-    ) -> Result<Option<CustomEvent>, String>;
-}
+        _header: &CustomBlockHeader,
+        _input: &str,
+    ) -> Result<Option<Box<dyn CustomBlock>>> {
+        unimplemented!()
+    }
 
-trait CustomBlock {
-    fn to_events(&self, format: Format) -> Vec<Event<'static>>;
-}
-
-#[derive(Clone, Debug)]
-pub enum CustomEvent {
-    ScriptBlock(ScriptBlock),
-    GraphBlock(GraphBlock),
-    PlottersBlock(PlottersBlock),
-    External((HashMap<String, serde_yaml::Value>, String)),
-}
-
-impl CustomBlock for CustomEvent {
-    fn to_events(&self, format: Format) -> Vec<Event<'static>> {
-        match self {
-            CustomEvent::ScriptBlock(sb) => sb.to_events(format),
-            CustomEvent::GraphBlock(gb) => gb.to_events(format),
-            CustomEvent::PlottersBlock(pb) => pb.to_events(format),
-            CustomEvent::External(_) => vec![],
-        }
+    /// Inspect inline code and return whether or not this reader should
+    /// be the one to process the inline code. If `true`, it indicates that
+    /// you should be able to call `read_inline` with the same input.
+    fn can_read_inline(&self, _inline: &str) -> bool {
+        false
+    }
+    /// Process inline code and return a CustomBlock.
+    ///
+    /// TODO: Option should be removed to always support "rerendering".
+    fn read_inline(&mut self, _inline: &str) -> Result<Option<Box<dyn CustomBlock>>> {
+        unimplemented!()
     }
 }
 
-#[derive(Clone, Debug)]
+/// Trait that represents a custom block that "extends" normal markdown
+/// functionality.
+///
+/// A custom block should support "rerendering", that is that the output
+/// of rendering it to markdown once, or rendering that output to markdown
+/// again, should produce the same result. This is to ensure that markdown
+/// to markdown rendering can be used as a formatter for yamdr documents,
+/// without changing the semantics of the document.
+pub trait CustomBlock {
+    /// Render the block as a list of `pulldown_cmark::Event`s.
+    ///
+    /// Takes a `Format`, as implementations may differ when rendering to
+    /// markdown or HTML. The `Vec` may be empty if nothing should be
+    /// rendered, but this should only be for `Format::Html` (because of
+    /// rerendering).
+    fn to_events(&self, format: Format) -> Vec<Event<'static>>;
+
+    /// This is a utility function that is used with
+    /// `utils::custom_block_downcast` for easier testing.
+    #[cfg(test)]
+    fn as_any(&self) -> &dyn std::any::Any {
+        unimplemented!()
+    }
+}
+
 pub enum ExtendedEvent<'a> {
     Standard(Event<'a>),
-    Custom(CustomEvent),
+    Custom(Box<dyn CustomBlock>),
+    External(ExternalBlock),
     Separator(u16),
 }
 
@@ -59,13 +93,13 @@ pub enum Format {
 }
 
 impl Format {
-    fn transform_extended_event(self, ee: ExtendedEvent) -> Vec<Event> {
-        let events = match ee {
-            ExtendedEvent::Standard(e) => vec![e],
-            ExtendedEvent::Custom(sb) => sb.to_events(self),
+    fn transform_extended_event<'a>(self, ee: &'a ExtendedEvent<'a>) -> Vec<Event<'a>> {
+        match ee {
+            ExtendedEvent::Standard(e) => vec![e.clone()],
+            ExtendedEvent::Custom(c) => c.to_events(self),
             ExtendedEvent::Separator(_) => vec![],
-        };
-        events
+            ExtendedEvent::External(_) => todo!(),
+        }
     }
     fn render<'a>(self, events: impl Iterator<Item = Event<'a>>) -> String {
         match self {
@@ -116,6 +150,44 @@ pub static STYLE: &str = r#"
         background-color: red;
         padding: 10px;
     }
+
+
+    pre {
+      overflow-x: auto;
+      line-height: 1;
+      font-size: 0.85em;
+      padding: 5px 0px;
+    }
+    pre.codeblock {
+      white-space: pre;
+      padding: 10px 0px;
+    }
+    pre.codeblock.language-terminal {
+      background-color: var(--codeblock-terminal-background);
+      color: var(--codeblock-terminal-text);
+    }
+    pre.codeblock > code {
+      display: block;
+      margin-left: 2em;
+    }
+    pre.codeblock > code.numbered {
+      margin-left: 0em;
+    }
+    pre.codeblock::before {
+      content: attr(data-file);
+      color: var(--codeblock-filename);
+      font-family: monospace;
+      display: block;
+      margin-bottom: 2px;
+      font-size: 1em;
+    }
+    code.numbered > span::before {
+      content: attr(data-linenumber);
+      text-align: right;
+      color: var(--codeblock-linenumber);
+      min-width: 3em;
+      display: inline-block;
+    }
 "#;
 
 #[derive(Clone)]
@@ -131,39 +203,19 @@ pub struct YamdrOptions {
 
 pub struct Meta {}
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(tag = "t")]
-pub enum CustomBlockHeader {
-    Graph,
-    Script(ScriptBlockHeader),
-    ScriptGlobals(ScriptBlockHeader),
-    Data(ScriptBlockHeader),
-    DynamicTable(ScriptBlockHeader),
-    DynamicChart(ScriptBlockHeader),
-    InlineScript,
-    Svg,
-    Test,
-    Plotters,
-    External(HashMap<String, serde_yaml::Value>),
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CustomBlockHeader {
+    pub t: String,
+
+    #[serde(flatten)]
+    pub fields: HashMap<String, serde_yaml::Value>,
 }
 
-#[derive(Debug)]
-struct CustomBlockError {
-    msg: String,
-}
-
-struct States {
-    script: ScriptState,
-    graph: GraphState,
-    plotters: PlottersState,
-}
-
-impl States {
-    fn new() -> Self {
-        States {
-            script: ScriptState::initial_state(),
-            graph: GraphState::initial_state(),
-            plotters: PlottersState::initial_state(),
+impl CustomBlockHeader {
+    pub fn empty(t: String) -> Self {
+        CustomBlockHeader {
+            t,
+            fields: HashMap::new(),
         }
     }
 }
@@ -171,15 +223,20 @@ impl States {
 fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
     let md_options = Options::all();
 
-    let mut states = States::new();
+    let mut readers: Vec<Box<dyn CustomBlockReader>> = vec![
+        Box::new(ScriptBlockReader::initial_state()),
+        Box::new(CodeBlockReader::initial_state()),
+        Box::new(PlottersBlockReader::initial_state()),
+        Box::new(GraphBlockReader::initial_state()),
+    ];
 
-    let mut current_custom_block: Option<Result<CustomBlockHeader, CustomBlockError>> = None;
+    let mut current_custom_block: Option<CustomBlockHeader> = None;
 
     let mut level = 0;
     let mut element_i = 0;
 
     let parser = Parser::new_ext(markdown, md_options)
-        .map(|event| {
+        .flat_map(|event| {
             match &event {
                 Event::Start(_) => {
                     level += 1;
@@ -208,8 +265,7 @@ fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
             };
             vec![event]
         })
-        .flatten()
-        .map(|event| match &event {
+        .flat_map(|event| match &event {
             Event::Start(Tag::FootnoteDefinition(id)) if id.as_ref().starts_with("yamdr:") => {
                 vec![ExtendedEvent::Separator(str::parse(&id[6..]).unwrap())]
             }
@@ -219,7 +275,7 @@ fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
             Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(prop))) => {
                 match serde_yaml::from_str::<CustomBlockHeader>(prop) {
                     Ok(block) => {
-                        current_custom_block = Some(Ok(block));
+                        current_custom_block = Some(block);
                         Vec::new()
                     }
                     Err(_) => {
@@ -227,7 +283,7 @@ fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
                     }
                 }
             }
-            Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(prop))) => {
+            Event::End(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
                 if current_custom_block.is_some() {
                     current_custom_block = None;
                     Vec::new()
@@ -236,90 +292,61 @@ fn parse_markdown(markdown: &str) -> Vec<ExtendedEvent> {
                 }
             }
             Event::Text(text) if current_custom_block.is_some() => {
-                let block = match current_custom_block.as_ref().unwrap() {
-                    Ok(block) => block,
-                    Err(_err) => {
-                        todo!()
-                        // errors.push(err.msg.clone());
-                        // return vec![ExtendedEvent::Custom(CustomEvent::CustomBlockError(err.msg.clone()))]
-                    }
-                };
-                match block {
-                    CustomBlockHeader::Graph => match states.graph.read_block(block, text) {
-                        Ok(Some(block)) => {
-                            return vec![ExtendedEvent::Custom(block)];
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            println!("{}", err);
-                            todo!()
-                        }
-                    },
-                    CustomBlockHeader::DynamicTable(_)
-                    | CustomBlockHeader::DynamicChart(_)
-                    | CustomBlockHeader::ScriptGlobals(_)
-                    | CustomBlockHeader::Script(_)
-                    | CustomBlockHeader::Data(_) => match states.script.read_block(block, text) {
-                        Ok(Some(block)) => {
-                            return vec![ExtendedEvent::Custom(block)];
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            println!("{}", err);
-                            todo!()
-                        }
-                    },
-                    CustomBlockHeader::Plotters => match states.plotters.read_block(block, text) {
-                        Ok(Some(block)) => {
-                            return vec![ExtendedEvent::Custom(block)];
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            println!("{}", err);
-                            todo!()
-                        }
-                    },
-                    CustomBlockHeader::External(head) => {
-                        return vec![ExtendedEvent::Custom(CustomEvent::External((
-                            head.clone(),
-                            text.to_string(),
-                        )))];
-                    }
-                    _ => {}
+                let custom_block_header = current_custom_block.as_ref().unwrap();
+                if custom_block_header.t == "External" {
+                    return vec![ExtendedEvent::External(ExternalBlock {
+                        body: text.to_string(),
+                        head: custom_block_header.fields.clone(),
+                    })];
                 }
-                Vec::new()
-            }
-            Event::Code(code) if code.starts_with("_") && code.ends_with("_") && code.len() > 2 => {
-                let code = &code[1..(code.len() - 1)];
-                match states
-                    .script
-                    .read_block(&CustomBlockHeader::InlineScript, code)
+                match readers
+                    .iter_mut()
+                    .find(|reader| reader.can_read_block(custom_block_header))
+                    .map(|reader| reader.read_block(custom_block_header, text))
                 {
-                    Ok(Some(block)) => {
-                        return vec![ExtendedEvent::Custom(block)];
+                    Some(Ok(Some(block))) => {
+                        vec![ExtendedEvent::Custom(block)]
                     }
-                    Ok(None) => unreachable!(),
-                    Err(err) => {
-                        println!("{}", err);
-                        todo!()
+                    Some(Ok(None)) => Vec::new(),
+                    Some(Err(_err)) => {
+                        todo!("error reading block")
+                    }
+                    None => {
+                        todo!("error custom block not implemented")
+                    }
+                }
+            }
+            Event::Code(code) => {
+                match readers
+                    .iter_mut()
+                    .find(|reader| reader.can_read_inline(code))
+                    .map(|reader| reader.read_inline(code))
+                {
+                    Some(Ok(Some(block))) => {
+                        vec![ExtendedEvent::Custom(block)]
+                    }
+                    Some(Ok(None)) => Vec::new(),
+                    Some(Err(_err)) => {
+                        todo!("error reading inline")
+                    }
+                    None => {
+                        vec![ExtendedEvent::Standard(event)]
                     }
                 }
             }
             _ => vec![ExtendedEvent::Standard(event)],
-        })
-        .flatten();
+        });
 
-    return parser.collect();
+    parser.collect()
 }
 
 pub fn render_markdown(options: &YamdrOptions, markdown: &str) -> (Meta, String) {
     let format = options.format.unwrap_or(Format::Html);
 
-    let parser = parse_markdown(markdown).into_iter();
-
-    let parser = parser
-        .map(|ee| format.transform_extended_event(ee))
-        .flatten();
+    let parsed_markdown = parse_markdown(markdown);
+    let parser = parsed_markdown
+        .iter()
+        .flat_map(|ee| format.transform_extended_event(ee));
 
     let mut output = format.render(parser);
 
@@ -375,6 +402,10 @@ pub struct ExternalBlock {
     pub head: HashMap<String, serde_yaml::Value>,
 }
 
+/// Representaion of a "top level" block of a markdown document. Contains
+/// both the rendered html, and the "rerendered" markdown. If the block
+/// is "external type", the block header and content can be accessed in
+/// the `external` field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarkdownBlock {
     pub id: u16,
@@ -383,6 +414,8 @@ pub struct MarkdownBlock {
     pub external: Option<ExternalBlock>,
 }
 
+/// Representation of a markdown document, both as rendered html, and as
+/// "rerendered" markdown.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarkdownDocumentBlocks {
     pub css: String,
@@ -390,6 +423,8 @@ pub struct MarkdownDocumentBlocks {
 }
 
 impl MarkdownDocumentBlocks {
+    /// Rerender the contents of the markdown in each block. Useful when editing
+    /// block by block, instead of entire documents.
     pub fn rerender(&mut self) {
         let markdown_document = self
             .blocks
@@ -401,6 +436,16 @@ impl MarkdownDocumentBlocks {
     }
 }
 
+/// Parse a markdown document and return a MarkdownDocumentBlocks that contains
+/// the blocks in the document, as well as css for the rendered html.
+///
+/// The blocks of the document are each "top level element", and are both rendered
+/// as html, and "rerendered" as markdown. If a block is "external type", the `external`
+/// field can be read to get the header and content of that block.
+///
+/// To build the complete html or markdown document, the `html` or `markdown` fields of
+/// each block can be joined. The `id` might be useful if you need to find out which
+/// block some html or markdown came from.
 pub fn render_blocks(markdown: &str) -> MarkdownDocumentBlocks {
     let html = Format::Html;
     let md = Format::Md;
@@ -419,32 +464,20 @@ pub fn render_blocks(markdown: &str) -> MarkdownDocumentBlocks {
         })
         .into_iter()
         .map(|(id, events)| {
-            if let &[ExtendedEvent::Custom(CustomEvent::External((head, body)))] =
-                &events.as_slice()
-            {
+            if let &[ExtendedEvent::External(external)] = &events.as_slice() {
                 return MarkdownBlock {
                     id,
                     html: "".into(),
-                    markdown: "".into(),
-                    external: Some(ExternalBlock {
-                        head: head.clone(),
-                        body: body.clone(),
-                    }),
+                    markdown: "".into(), // TODO rerendering
+                    external: Some(external.clone()),
                 };
             }
             let html = html.render(
                 events
-                    .clone()
-                    .into_iter()
-                    .map(|ee| html.transform_extended_event(ee))
-                    .flatten(),
+                    .iter()
+                    .flat_map(|ee| html.transform_extended_event(ee)),
             );
-            let markdown = md.render(
-                events
-                    .into_iter()
-                    .map(|ee| md.transform_extended_event(ee))
-                    .flatten(),
-            );
+            let markdown = md.render(events.iter().flat_map(|ee| md.transform_extended_event(ee)));
             MarkdownBlock {
                 id,
                 html,
@@ -453,10 +486,10 @@ pub fn render_blocks(markdown: &str) -> MarkdownDocumentBlocks {
             }
         })
         .collect();
-    return MarkdownDocumentBlocks {
+    MarkdownDocumentBlocks {
         css: STYLE.into(),
         blocks,
-    };
+    }
 }
 
 #[cfg(test)]
@@ -525,10 +558,7 @@ Code block
             r#"External block
 "#
         );
-        assert_eq!(
-            external.head.get("test").unwrap().as_i64(),
-            Some(123),
-        );
+        assert_eq!(external.head.get("test").unwrap().as_i64(), Some(123),);
     }
 
     #[test]

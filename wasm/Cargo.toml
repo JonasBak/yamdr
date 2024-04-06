@@ -10,5 +10,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 md = { path = "../md" }
-rhai = { version = "1.11.0", features = ["wasm-bindgen"] }
-wasm-bindgen = { version = "0.2.83" }
+rhai = { version = "1.16.3", features = ["wasm-bindgen"] }
+wasm-bindgen = { version = "0.2.90" }

@@ -1,19 +1,9 @@
-use crate::{CustomBlock, CustomBlockHeader, CustomBlockState, CustomEvent, Format};
-use layout::backends::svg::SVGWriter;
-use layout::gv;
+use crate::{CustomBlock, CustomBlockHeader, CustomBlockReader, Error, Format, Result};
 use plotters::prelude::*;
-use pulldown_cmark::{escape::escape_html, CodeBlockKind, Event, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, Tag};
 use serde::{Deserialize, Serialize};
 
-static COLORS: &[RGBColor] = &[
-    RED,
-    GREEN,
-    BLUE,
-    YELLOW,
-    MAGENTA,
-    CYAN,
-    BLACK,
-];
+static COLORS: &[RGBColor] = &[RED, GREEN, BLUE, YELLOW, MAGENTA, CYAN, BLACK];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -26,26 +16,31 @@ pub enum PlottersBlock {
     },
 }
 
-pub struct PlottersState {}
+pub struct PlottersBlockReader {}
 
-impl CustomBlockState for PlottersState {
-    fn initial_state() -> Self {
-        return PlottersState {};
+impl PlottersBlockReader {
+    pub fn initial_state() -> Self {
+        PlottersBlockReader {}
+    }
+}
+
+impl CustomBlockReader for PlottersBlockReader {
+    fn can_read_block(&self, header: &CustomBlockHeader) -> bool {
+        header.t == "Plotters"
     }
 
     fn read_block(
         &mut self,
         header: &CustomBlockHeader,
         input: &str,
-    ) -> Result<Option<CustomEvent>, String> {
-        match header {
-            CustomBlockHeader::Plotters => {
-                let data = serde_yaml::from_str::<PlottersBlock>(input)
-                    .map_err(|e| format!("failed to parse block: {}", e.to_string()))?;
-                Ok(Some(CustomEvent::PlottersBlock(data)))
-            }
-            _ => todo!(),
+    ) -> Result<Option<Box<dyn CustomBlock>>> {
+        if header.t != "Plotters" {
+            todo!("unsupported block type")
         }
+        let data = serde_yaml::from_str::<PlottersBlock>(input).map_err(|e| {
+            Error::CustomBlockRead(format!("failed to parse block: {}", e))
+        })?;
+        Ok(Some(Box::new(data)))
     }
 }
 
@@ -54,7 +49,7 @@ impl CustomBlock for PlottersBlock {
         match (self, format) {
             (_, Format::Md) => {
                 let props: pulldown_cmark::CowStr =
-                    serde_json::to_string(&CustomBlockHeader::Plotters)
+                    serde_json::to_string(&CustomBlockHeader::empty("Plotters".into()))
                         .unwrap()
                         .into();
                 let mut events = vec![Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(
@@ -66,13 +61,41 @@ impl CustomBlock for PlottersBlock {
 
                 events
             }
-            (PlottersBlock::LineChart { title, range_x, range_y, data }, Format::Html) => {
+            (
+                PlottersBlock::LineChart {
+                    title,
+                    range_x,
+                    range_y,
+                    data,
+                },
+                Format::Html,
+            ) => {
                 let mut svg = String::new();
                 {
                     let root = SVGBackend::with_string(&mut svg, (600, 400)).into_drawing_area();
 
-                    let range_x = range_x.unwrap_or_else(|| (0.0, data.iter().flatten().map(|(x, y)| x).max_by(|a, b| a.partial_cmp(b).unwrap()).copied().unwrap_or(0.0)));
-                    let range_y = range_y.unwrap_or_else(|| (0.0, data.iter().flatten().map(|(x, y)| y).max_by(|a, b| a.partial_cmp(b).unwrap()).copied().unwrap_or(0.0)));
+                    let range_x = range_x.unwrap_or_else(|| {
+                        (
+                            0.0,
+                            data.iter()
+                                .flatten()
+                                .map(|(x, _y)| x)
+                                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                .copied()
+                                .unwrap_or(0.0),
+                        )
+                    });
+                    let range_y = range_y.unwrap_or_else(|| {
+                        (
+                            0.0,
+                            data.iter()
+                                .flatten()
+                                .map(|(_x, y)| y)
+                                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                .copied()
+                                .unwrap_or(0.0),
+                        )
+                    });
 
                     let mut chart = ChartBuilder::on(&root)
                         .caption(title, ("sans-serif", 40).into_font())
@@ -97,18 +120,12 @@ impl CustomBlock for PlottersBlock {
                 }
                 vec![Event::Html(svg.into())]
             }
-            _ => {
-                todo!()
-            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
-
     #[test]
     fn render_markdown() {
         let documents = [(
@@ -148,10 +165,10 @@ data:
         )];
         let format = crate::Format::Md;
         for (document, expected) in documents {
-            let events = crate::parse_markdown(document)
-                .into_iter()
-                .map(|ee| format.transform_extended_event(ee))
-                .flatten();
+            let parsed_markdown = crate::parse_markdown(document);
+            let events = parsed_markdown
+                .iter()
+                .flat_map(|ee| format.transform_extended_event(ee));
             let output = format.render(events);
 
             assert_eq!(expected, output);
